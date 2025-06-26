@@ -48,7 +48,7 @@ chmod +x install_dynamic-tlp.sh
 To use the C-based standalone binary
 
 ```bash
-wget https://github.com/DiabloPower/burn2cool/blob/main/cpu_throttle
+wget https://github.com/DiabloPower/burn2cool/releases/download/release/cpu_throttle
 chmod +x cpu_throttle
 ./cpu_throttle
 ```
