@@ -16,11 +16,15 @@ A lightweight Linux service that dynamically throttles CPU frequency based on te
   - `cpu_throttle` – compiled binary
   - `install_cpu-throttle.sh` – portable compiler/installer script with service integration (needs the source file)
 
+> ⚡️ Don't need a service? You can run the precompiled `cpu_throttle` binary directly — no compiling, no installation required. Just make it executable and launch it from the terminal.
+
 ### 2. `install_dynamic-tlp.sh` (Bash alternative)
 - Bash-based CPU throttle daemon, also governed by temperature
 - Independent of the C program and easy to modify
 - Sets up a systemd service called `dynamic-tlp.service`
 - Great for experimentation or fallback use
+
+> ⚠️ You only need one: either the C-based `cpu_throttle` service or the Bash-based `dynamic-tlp` script. Both serve the same purpose — choose the one that fits your setup and preferences.
 
 ---
 
@@ -38,4 +42,18 @@ To install the Bash-based daemon:
 ```bash
 chmod +x install_dynamic-tlp.sh
 ./install_dynamic-tlp.sh
+```
+
+> 💡 Tip: If you just want to run the tool manually, feel free to use the `cpu_throttle` binary on its own — no service setup required.
+To use the C-based standalone binary
+
+```bash
+wget https://github.com/DiabloPower/burn2cool/cpu_throttle
+chmod +x cpu_throttle
+./cpu_throttle
+```
+
+> For available command line options:
+```bash
+./cpu_throttle --help
 ```
