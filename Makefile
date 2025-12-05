@@ -60,3 +60,24 @@ $(INCLUDE_DIR):
 .PHONY: clean
 clean:
 	rm -f $(INCLUDE_DIR)/*.h
+
+# Compiler and simple build rules so `make` actually builds the daemon and helpers
+CC ?= gcc
+CFLAGS ?= -std=gnu11 -O2 -Wall -Wextra -pthread
+LDFLAGS ?=
+
+SRCS := cpu_throttle.c cpu_throttle_tui.c cpu_throttle_ctl.c
+TARGETS := cpu_throttle cpu_throttle_tui cpu_throttle_ctl
+
+.PHONY: all
+all: assets $(TARGETS)
+
+cpu_throttle: cpu_throttle.c
+	$(CC) $(CFLAGS) -o $@ cpu_throttle.c $(LDFLAGS)
+
+cpu_throttle_tui: cpu_throttle_tui.c
+	$(CC) $(CFLAGS) -o $@ cpu_throttle_tui.c -lncurses $(LDFLAGS)
+
+cpu_throttle_ctl: cpu_throttle_ctl.c
+	$(CC) $(CFLAGS) -o $@ cpu_throttle_ctl.c $(LDFLAGS)
+
