@@ -311,6 +311,38 @@ if [[ "$SKIP_BUILD" != true ]]; then
     fi
 fi
 
+# If we have a downloaded single binary (SRC_BIN_PATH) and no ctl binary found,
+# try to fetch the companion control binary from the same GitHub release (if applicable).
+if [[ -n "${SRC_BIN_PATH:-}" && -z "${CTL_BIN_SRC:-}" && -n "${REMOTE_URL:-}" ]]; then
+    if echo "$REMOTE_URL" | grep -q "/releases/download/"; then
+        # try to extract tag from URL
+        if [[ "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
+            rel_tag="${BASH_REMATCH[1]}"
+        else
+            rel_tag="${RELEASE_TAG:-}"
+        fi
+        if [[ -z "${rel_tag:-}" ]]; then
+            api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/latest"
+        else
+            api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/tags/${rel_tag}"
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            assets=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p' || true)
+            if [[ -n "$assets" ]]; then
+                ctl_url=$(echo "$assets" | grep -i "/${CTL_BINARY_NAME}\(\.|$\)" | head -n1 || true)
+                if [[ -n "$ctl_url" ]]; then
+                    echo "➡️ Downloading companion control binary: $ctl_url"
+                    if command -v curl >/dev/null 2>&1; then
+                        curl -fSL -o "$TMPDIR/${CTL_BINARY_NAME}" "$ctl_url" || true
+                        chmod +x "$TMPDIR/${CTL_BINARY_NAME}" || true
+                        CTL_BIN_SRC="$TMPDIR/${CTL_BINARY_NAME}"
+                    fi
+                fi
+            fi
+        fi
+    fi
+fi
+
 cd "$BUILD_DIR"
 
 # --- Offer to install build dependencies ---
@@ -481,8 +513,13 @@ if ! install_binary "$SRC_BIN_PATH" "$BUILD_PATH"; then
     echo "❌ Could not install main binary to $BUILD_PATH"; exit 1
 fi
 
-if [[ -n "$CTL_BINARY_NAME" && -f "$CTL_BINARY_NAME" ]]; then
-    install_binary "$CTL_BINARY_NAME" "$CTL_BUILD_PATH" || true
+# Ensure CTL_BIN_SRC points to a control-binary path if it exists (from archive, download, or build)
+if [[ -z "${CTL_BIN_SRC:-}" ]]; then
+    # check current build dir (we cd'd there earlier)
+    CTL_BIN_SRC=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$CTL_BINARY_NAME" -print -quit || true)
+fi
+if [[ -n "${CTL_BIN_SRC:-}" && -f "$CTL_BIN_SRC" ]]; then
+    install_binary "$CTL_BIN_SRC" "$CTL_BUILD_PATH" || true
 fi
 
 # Optional: build/install TUI if requested
