@@ -225,6 +225,34 @@ else
     BUILD_DIR="$(pwd)"
 fi
 
+# Detect prebuilt binaries in download (direct binary or archive containing executables)
+SKIP_BUILD=false
+if [[ -n "${TMPDIR:-}" && -f "$TMPDIR/archive" ]]; then
+    # If the downloaded file itself is an ELF binary, install it directly
+    if command -v file >/dev/null 2>&1 && file -b "$TMPDIR/archive" | grep -qi '\<elf\>'; then
+        echo "✅ Detected downloaded ELF binary; will install directly from archive"
+        SRC_BIN_PATH="$TMPDIR/archive"
+        # try to detect ctl binary by name nearby (not applicable for single-file download)
+        SKIP_BUILD=true
+    fi
+fi
+
+if [[ "$SKIP_BUILD" != true ]]; then
+    # Look for prebuilt binaries inside the extracted tree (common for release tarballs)
+    PREBUILT_MAIN=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$BINARY_NAME" -print -quit || true)
+    PREBUILT_CTL=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$CTL_BINARY_NAME" -print -quit || true)
+    # if found and not a text source file, prefer it
+    if [[ -n "$PREBUILT_MAIN" ]]; then
+        echo "✅ Found prebuilt main binary in archive: $PREBUILT_MAIN"
+        SRC_BIN_PATH="$PREBUILT_MAIN"
+        SKIP_BUILD=true
+    fi
+    if [[ -n "$PREBUILT_CTL" ]]; then
+        echo "✅ Found prebuilt control binary in archive: $PREBUILT_CTL"
+        CTL_BIN_SRC="$PREBUILT_CTL"
+    fi
+fi
+
 cd "$BUILD_DIR"
 
 # --- Offer to install build dependencies ---
