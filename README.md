@@ -1,3 +1,63 @@
+CPU Throttle daemon — embedded web UI
+===================================
+
+This repository contains `cpu_throttle.c`, a small Linux daemon that monitors CPU temperature
+and throttles maximum CPU frequency. It also embeds a small web UI (HTML/JS/CSS) into the
+daemon binary by converting static assets into C headers.
+
+Quick build & run
+------------------
+
+Prerequisites:
+- `gcc` (C compiler)
+- `make`
+- `xxd` (optional) — used to generate C headers from assets. If `xxd` is not available the
+  `Makefile` will fall back to a small `python3` generator (so `python3` is a soft requirement).
+
+Build steps:
+
+```bash
+# generate C headers from assets (creates `include/*.h` and enables USE_ASSET_HEADERS)
+make assets
+
+# compile
+gcc -std=c11 -Wall -Wextra -Wpedantic -Wformat-truncation cpu_throttle.c -o cpu_throttle -pthread
+
+# run (example port)
+./cpu_throttle --web-port 19090 &> cpu_throttle.out &
+
+# open http://localhost:19090/ in your browser
+```
+
+Notes about assets
+------------------
+- Static sources live in `assets/` (`index.html`, `main.js`, `styles.css`, `favicon.ico`).
+- `make assets` converts these files into C include headers under `include/`.
+- The server prefers the generated headers (`USE_ASSET_HEADERS`) and serves the binary arrays
+  directly with a proper `Content-Length` header.
+
+Committing generated headers
+---------------------------
+If you want other users to be able to compile the project without `xxd`/`python3`, you can
+commit the generated headers in `include/` into the Git repository. To (re)generate and add
+them:
+
+```bash
+make assets
+git add include/*.h
+git commit -m "Add generated asset headers (index, main.js, styles, favicon)"
+```
+
+If you prefer not to commit generated files, make sure CI or packagers run `make assets`
+before building the binary.
+
+Favicon
+-------
+The web UI links to `/favicon.ico`. Place your favicon file at `assets/favicon.ico` and
+run `make assets` to embed it. The server serves `/favicon.ico` with `Content-Type: image/x-icon`.
+
+If you want me to commit the generated headers to the repo, tell me and I will create a patch
+that adds `include/*.h` and a README note indicating they are generated.
 # Burn2Cool — The ROG Tamer CPU Throttle Daemon
 
 A lightweight Linux service that dynamically throttles CPU frequency based on temperature. Originally designed to tame the powerful (and sometimes thermally confused) **ASUS ROG Strix Hero III**, it works on most Linux systems with standard thermal zones and CPUFreq drivers.
@@ -89,7 +149,24 @@ chmod +x install_dynamic-tlp.sh
 ./install_dynamic-tlp.sh
 ```
 
+When installing the C-based daemon with `install_cpu-throttle.sh`, the installer will ask whether to enable the web interface by default and write `web_port=8086` into `/etc/cpu_throttle.conf` if you agree. You can change this later in the config file or by passing `--web-port` to the daemon.
+
 > 💡 Tip: If you just want to run the tool manually, feel free to use the `cpu_throttle` binary on its own — no service setup required.
+
+## 🌐 Web Interface & Firewall
+
+The daemon includes an embedded web dashboard and a REST API (default port `8086`). During installation you can enable the web interface automatically; the installer can also offer to add firewall rules for common firewall tools.
+
+Supported installer firewall integrations:
+
+- `ufw` — installer can run `sudo ufw allow 8086/tcp` when you confirm
+- `firewalld` — installer can run `sudo firewall-cmd --permanent --add-port=8086/tcp` and reload when you confirm
+
+If no supported firewall tool is detected, the installer will print a hint so you can add a rule for your firewall manually.
+
+To disable the web interface at runtime, either set `web_port=0` in `/etc/cpu_throttle.conf` or launch the daemon with `--web-port 0`.
+
+Note: a small Flask-based development scaffold previously lived in `web_ui/`. The SPA is now embedded in the daemon itself and the Flask scaffold is deprecated — see `web_ui/README.md` for details. You can safely remove `web_ui/` if you don't need the development server.
 
 ---
 
@@ -159,6 +236,30 @@ cpu_throttle_ctl delete-profile oldprofile
 ```
 
 > 💡 Profiles are stored in `~/.config/cpu_throttle/profiles/` (per-user)
+
+### Ncurses TUI (optional)
+
+An optional Ncurses-based TUI is provided as `cpu_throttle_tui` for interactive runtime control and profile management. The TUI mirrors the CLI/socket features but provides a convenient in-terminal UI. It is purely optional — you can continue to use the control utility or direct socket commands if you prefer.
+
+- Build and run:
+
+```bash
+gcc -std=c11 -Wall -Wextra -Wpedantic -Wformat-truncation -pthread cpu_throttle_tui.c -lncurses -o cpu_throttle_tui
+./cpu_throttle_tui
+```
+
+- Minimum terminal size: 80×24 (the TUI will prompt you to enlarge smaller terminals).
+- Key highlights:
+  - `/` to set a profile filter (substring), `g` clears the filter
+  - `UP`/`DOWN` to select profiles, `l` to load, `c` to create, `e` to edit inline, `d` to delete
+  - Inline editor supports cursor movement (Left/Right/Home/End), Delete, Backspace; ESC cancels edits
+  - `S` triggers an interactive foreground restart/start of the service. The TUI detects whether the unit is installed as a user or system unit and prefers the detected scope. If necessary and after your confirmation, it can run `sudo systemctl restart ...` in the foreground so you can enter a password.
+  - `D` sends `quit` to the daemon (with confirmation)
+  - `h` shows a paginated help pane (Space/PageDown/PageUp/n/p for navigation)
+
+The TUI communicates with the daemon over the same Unix socket (`/tmp/cpu_throttle.sock`) and stores profiles at the same path (`~/.config/cpu_throttle/profiles/`).
+
+Use the TUI if you want an on-terminal interactive experience; otherwise, the CLI/ctl tools provide the same functionality programmatically.
 
 ### Example Workflow
 

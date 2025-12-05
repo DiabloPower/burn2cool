@@ -1,0 +1,17 @@
+*, *:before, *:after { box-sizing: border-box; }
+body{ font-family: sans-serif; margin: 12px; }
+header h1{ margin:0 0 12px 0 }
+main{ display:flex; gap:20px }
+#profiles, #status{ flex:1 }
+#list{ max-height:400px; overflow:auto; border:1px solid #ccc; padding:6px }
+.profile{ padding:6px; margin-bottom:6px; border-bottom:1px dashed #eee }
+.profile .preview{ color:#333; font-size:0.9em }
+textarea{ width:100%; max-width:100%; box-sizing:border-box; resize:vertical }
+input, textarea, button{ font-size:0.95em }
+button{ min-width:140px; width:140px; padding:8px 12px; }
+pre{ background:#f6f6f6; padding:8px; border:1px solid #ddd }
+@media (max-width:700px) {
+  body{ margin:8px; padding:12px }
+  .card{ padding:12px }
+  input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0 }
+}

@@ -150,6 +150,52 @@ echo "   - $BUILD_PATH (daemon)"
 echo "   - $CTL_BUILD_PATH (control utility)"
 
 # Step 2: Create systemd service
+# Ask user whether to enable web interface by default (writes /etc/cpu_throttle.conf)
+read -r -p "Enable web interface on port 8086 by default? [Y/n]: " ENABLE_WEB
+ENABLE_WEB=${ENABLE_WEB:-Y}
+if [[ "$ENABLE_WEB" =~ ^[Yy] ]]; then
+    echo "➡️ Enabling web interface by default (web_port=8086)"
+    # Ensure config directory and file, write or replace web_port value
+    sudo mkdir -p /etc
+    if sudo grep -q "^web_port=" /etc/cpu_throttle.conf 2>/dev/null; then
+        sudo sed -i "s/^web_port=.*/web_port=8086/" /etc/cpu_throttle.conf
+    else
+        echo "web_port=8086" | sudo tee -a /etc/cpu_throttle.conf > /dev/null
+    fi
+else
+    echo "➡️ Web interface will be disabled by default. You can enable later by editing /etc/cpu_throttle.conf or using --web-port"
+fi
+
+# Firewall integration: ask to open port 8086 for common firewalls (ufw, firewalld)
+WEB_PORT=8086
+if [[ "$ENABLE_WEB" =~ ^[Yy] ]]; then
+    # Detect ufw
+    if command -v ufw &>/dev/null; then
+        read -r -p "Detected ufw firewall. Open port ${WEB_PORT}/tcp? [Y/n]: " UFW_ANSWER
+        UFW_ANSWER=${UFW_ANSWER:-Y}
+        if [[ "$UFW_ANSWER" =~ ^[Yy] ]]; then
+            echo "➡️ Adding ufw rule for port ${WEB_PORT}/tcp"
+            sudo ufw allow ${WEB_PORT}/tcp
+        fi
+    fi
+
+    # Detect firewalld
+    if command -v firewall-cmd &>/dev/null; then
+        read -r -p "Detected firewalld. Open port ${WEB_PORT}/tcp (permanent)? [Y/n]: " FWD_ANSWER
+        FWD_ANSWER=${FWD_ANSWER:-Y}
+        if [[ "$FWD_ANSWER" =~ ^[Yy] ]]; then
+            echo "➡️ Adding firewalld rule for port ${WEB_PORT}/tcp"
+            sudo firewall-cmd --permanent --add-port=${WEB_PORT}/tcp
+            sudo firewall-cmd --reload
+        fi
+    fi
+
+    # If neither firewall detected, print hint
+    if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
+        echo "ℹ️ No ufw or firewalld detected. If you run a different firewall, please open port ${WEB_PORT}/tcp manually."
+    fi
+fi
+
 cat << EOF | sudo tee "$SERVICE_PATH" > /dev/null
 [Unit]
 Description=Temperature-based CPU frequency scaling daemon
