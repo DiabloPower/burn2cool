@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CPU Throttle Monitor</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <style>
+    *, *:before, *:after { box-sizing: border-box; }
+    body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:20px;background:#1a1a1a;color:#fff}
+    h1{color:#FF8C00}h2{border-bottom:2px solid #FF8C00;padding-bottom:10px}
+    .card{background:#2a2a2a;padding:20px;margin:10px 0;border-radius:8px}
+    .value{font-size:2em;font-weight:bold;color:#FF8C00}
+    .label{color:#999;font-size:0.9em}
+    button{background:#FF8C00;color:#fff;border:none;padding:8px 12px;margin:5px;border-radius:4px;cursor:pointer;width:140px;text-align:center;display:inline-block}
+    button:hover{background:#e67e22}
+    input{padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;max-width:100%}
+    textarea{width:100%;max-width:100%;box-sizing:border-box;padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;resize:vertical}
+    .topbar{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:0.9em;background:rgba(0,0,0,0.15);border-radius:6px;margin-bottom:12px}
+    .topbar a{color:#fff;text-decoration:none;font-weight:600}
+    .topbar .version{color:#ddd;font-size:0.85em}
+    @media (max-width:700px) {
+      body{padding:12px;margin:8px}
+      .card{padding:12px}
+      .topbar{font-size:0.85em;flex-direction:column;align-items:flex-start;gap:6px}
+      .topbar .version{align-self:flex-end}
+      input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0; }
+      .value{font-size:1.6em}
+    }
+  </style>
+  </head>
+  <body>
+    <div class='topbar'><a href='https://github.com/DiabloPower/burn2cool' target='_blank' rel='noopener'>GitHub</a><div class='version'>v3.0</div></div>
+    <h1>CPU Throttle Monitor</h1>
+    <div class='card'>
+      <h2>Current Status</h2>
+      <div class='label'>Temperature</div>
+      <div class='value' id='temp'>--</div>
+      <div class='label'>Frequency</div>
+      <div class='value' id='freq'>--</div>
+    </div>
+    <div class='card'>
+      <h2>Settings</h2>
+      <div><input id='safe_max' type='number' placeholder='Safe Max (kHz)'>
+      <button onclick='setSetting("safe-max",document.getElementById("safe_max").value)'>Set Max</button></div>
+      <div><input id='safe_min' type='number' placeholder='Safe Min (kHz)'>
+      <button onclick='setSetting("safe-min",document.getElementById("safe_min").value)'>Set Min</button></div>
+      <div><input id='temp_max' type='number' placeholder='Temp Max (C)'>
+      <button onclick='setSetting("temp-max",document.getElementById("temp_max").value)'>Set Temp</button></div>
+    </div>
+    <div class='card'>
+      <h2>Profiles</h2>
+      <div id='profilesList' class='label'>(loading...)</div>
+      <hr/>
+      <input id='pname' placeholder='profile filename' />
+      <textarea id='pcontent' rows='6' placeholder='profile content (key=value lines)'></textarea>
+      <div>
+        <button id='createBtn'>Create</button>
+        <button id='saveBtn'>Save</button>
+        <button id='deleteBtn'>Delete</button>
+        <button id='loadBtn'>Load to daemon</button>
+      </div>
+    </div>
+    <script>
+      function update(){
+        fetch('/api/status').then(r=>r.json()).then(d=>{
+          document.getElementById('temp').textContent=d.temperature+'°C';
+          document.getElementById('freq').textContent=(d.frequency/1000).toFixed(0)+' MHz';
+        }).catch(()=>{});
+        refreshProfiles();
+      }
+      function setSetting(name,val){
+        fetch('/api/settings/'+name,{method:'POST',body:JSON.stringify({value:parseInt(val)}),headers:{'Content-Type':'application/json'}}).then(()=>update());
+      }
+      function refreshProfiles(){
+        fetch('/api/profiles').then(r=>r.json()).then(list=>{
+          if(!list || !Array.isArray(list)) { document.getElementById('profilesList').textContent='(no profiles)'; return; }
+          const container = document.getElementById('profilesList');
+          container.innerHTML = '';
+          list.forEach(name=>{
+            const el = document.createElement('div'); el.className='label'; el.style.margin='6px 0';
+            el.textContent = name;
+            el.onclick = ()=>{ loadProfileToEditor(name); };
+            container.appendChild(el);
+          });
+        }).catch(()=>{ document.getElementById('profilesList').textContent='(failed)'; });
+      }
+      function loadProfileToEditor(name){
+        fetch('/api/profiles/'+encodeURIComponent(name)).then(r=>{ if(!r.ok) throw 0; return r.text(); }).then(t=>{
+          document.getElementById('pname').value = name;
+          document.getElementById('pcontent').value = t;
+        }).catch(()=>alert('Failed to load profile'));
+      }
+      function createProfile(){
+        const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;
+        if(!name){ alert('Enter filename'); return; }
+        fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Create failed'); });
+      }
+      function saveProfile(){
+        const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;
+        if(!name){ alert('Enter filename'); return; }
+        fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Save failed'); });
+      }
+      function deleteProfile(){
+        const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }
+        if(!confirm('Delete '+name+'?')) return;
+        fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else alert('Delete failed'); });
+      }
+      function loadProfile(){
+        const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }
+        fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok) alert('Loaded '+name); else alert('Load failed'); }).catch(()=>alert('Load failed'));
+      }
+      document.addEventListener('DOMContentLoaded', ()=>{
+        document.getElementById('createBtn').addEventListener('click', createProfile);
+        document.getElementById('saveBtn').addEventListener('click', saveProfile);
+        document.getElementById('deleteBtn').addEventListener('click', deleteProfile);
+        document.getElementById('loadBtn').addEventListener('click', loadProfile);
+        setInterval(update,1000); update();
+      });
+    </script>
+  </body>
+</html>
