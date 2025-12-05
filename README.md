@@ -1,12 +1,50 @@
 CPU Throttle daemon — embedded web UI
 ===================================
 
-This repository contains `cpu_throttle.c`, a small Linux daemon that monitors CPU temperature
-and throttles maximum CPU frequency. It also embeds a small web UI (HTML/JS/CSS) into the
-daemon binary by converting static assets into C headers.
+This repository contains `cpu_throttle`, a small Linux daemon that monitors CPU temperature
+and throttles maximum CPU frequency. It embeds a small web UI (HTML/JS/CSS) into the
+daemon binary by converting static assets into C headers so a single executable can serve
+the dashboard.
 
-Quick build & run
-------------------
+Quick install (prebuilt releases)
+---------------------------------
+
+If you just want to run the program, download the prebuilt binaries from the Releases page —
+this is the recommended path for non-developers.
+
+- Releases: https://github.com/DiabloPower/burn2cool/releases
+
+Example (download latest release binary, make executable and run):
+
+```bash
+# adjust URL to the specific release asset you want from Releases
+wget -O cpu_throttle https://github.com/DiabloPower/burn2cool/releases/download/<tag>/cpu_throttle
+chmod +x cpu_throttle
+sudo ./cpu_throttle
+```
+
+Install directly from the web (convenience one-liner)
+---------------------------------------------------
+
+You can fetch and run the installer directly with `curl` or `wget`. Use this only when you
+trust the source and understand the actions the installer will perform (it may install
+packages and create a systemd service):
+
+```bash
+# using curl
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh)" -- -y
+
+# or using wget
+bash -c "$(wget -qO- https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh)" -- -y
+```
+
+Notes:
+- `-- -y` passes `-y` to the installer script to run non-interactively (accept defaults).
+- The installer will detect your distro, install missing build dependencies (if you allow it),
+  build the project, install binaries to `/usr/local/bin/`, and create a systemd service.
+
+Quick build & run (from source)
+-------------------------------
 
 Prerequisites:
 - `gcc` (C compiler)
@@ -14,14 +52,14 @@ Prerequisites:
 - `xxd` (optional) — used to generate C headers from assets. If `xxd` is not available the
   `Makefile` will fall back to a small `python3` generator (so `python3` is a soft requirement).
 
-Build steps:
+Build steps (developer):
 
 ```bash
 # generate C headers from assets (creates `include/*.h` and enables USE_ASSET_HEADERS)
 make assets
 
-# compile
-gcc -std=c11 -Wall -Wextra -Wpedantic -Wformat-truncation cpu_throttle.c -o cpu_throttle -pthread
+# compile (or just run `make` - Makefile provides targets for binaries)
+make -j$(nproc)
 
 # run (example port)
 ./cpu_throttle --web-port 19090 &> cpu_throttle.out &
@@ -29,18 +67,15 @@ gcc -std=c11 -Wall -Wextra -Wpedantic -Wformat-truncation cpu_throttle.c -o cpu_
 # open http://localhost:19090/ in your browser
 ```
 
-Notes about assets
-------------------
+Assets & generated headers
+--------------------------
 - Static sources live in `assets/` (`index.html`, `main.js`, `styles.css`, `favicon.ico`).
 - `make assets` converts these files into C include headers under `include/`.
 - The server prefers the generated headers (`USE_ASSET_HEADERS`) and serves the binary arrays
   directly with a proper `Content-Length` header.
 
-Committing generated headers
----------------------------
 If you want other users to be able to compile the project without `xxd`/`python3`, you can
-commit the generated headers in `include/` into the Git repository. To (re)generate and add
-them:
+commit the generated headers in `include/` into the repository. To (re)generate and add them:
 
 ```bash
 make assets
@@ -48,16 +83,10 @@ git add include/*.h
 git commit -m "Add generated asset headers (index, main.js, styles, favicon)"
 ```
 
-If you prefer not to commit generated files, make sure CI or packagers run `make assets`
-before building the binary.
-
 Favicon
 -------
 The web UI links to `/favicon.ico`. Place your favicon file at `assets/favicon.ico` and
 run `make assets` to embed it. The server serves `/favicon.ico` with `Content-Type: image/x-icon`.
-
-If you want me to commit the generated headers to the repo, tell me and I will create a patch
-that adds `include/*.h` and a README note indicating they are generated.
 # Burn2Cool — The ROG Tamer CPU Throttle Daemon
 
 A lightweight Linux service that dynamically throttles CPU frequency based on temperature. Originally designed to tame the powerful (and sometimes thermally confused) **ASUS ROG Strix Hero III**, it works on most Linux systems with standard thermal zones and CPUFreq drivers.
