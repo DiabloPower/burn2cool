@@ -361,11 +361,42 @@ if [[ -z "$SRC_BIN_PATH" ]]; then
 fi
 
 echo "➡️ Installing binaries to /usr/local/bin (sudo required)"
-sudo cp "$SRC_BIN_PATH" "$BUILD_PATH"
-sudo chmod +x "$BUILD_PATH"
+
+# Helper: attempt to install a file, stopping service if it blocks (Text file busy)
+install_binary() {
+    local src="$1" dst="$2"
+    # Try a normal copy first
+    if sudo cp "$src" "$dst" 2>/dev/null; then
+        sudo chmod +x "$dst" || true
+        return 0
+    fi
+
+    echo "⚠️ Could not overwrite $dst (maybe it's running). Attempting safe replace..."
+
+    # If a systemd service exists for the binary, stop it first
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-active --quiet "$BINARY_NAME".service 2>/dev/null; then
+            echo "Stopping service $BINARY_NAME to replace binary..."
+            sudo systemctl stop "$BINARY_NAME".service || true
+        fi
+    fi
+
+    # Try again
+    if sudo cp "$src" "$dst"; then
+        sudo chmod +x "$dst" || true
+        return 0
+    fi
+
+    echo "❌ Failed to install $dst after stopping service." >&2
+    return 1
+}
+
+if ! install_binary "$SRC_BIN_PATH" "$BUILD_PATH"; then
+    echo "❌ Could not install main binary to $BUILD_PATH"; exit 1
+fi
+
 if [[ -n "$CTL_BINARY_NAME" && -f "$CTL_BINARY_NAME" ]]; then
-    sudo cp "$CTL_BINARY_NAME" "$CTL_BUILD_PATH" || true
-    sudo chmod +x "$CTL_BUILD_PATH" || true
+    install_binary "$CTL_BINARY_NAME" "$CTL_BUILD_PATH" || true
 fi
 
 # Optional: build/install TUI if requested
