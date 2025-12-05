@@ -1,15 +1,61 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Target paths
-BINARY_NAME="cpu-throttle"
-CTL_BINARY_NAME="cpu-throttle-ctl"
+# CLI options (can be used for non-interactive installs)
+AUTO_YES=0
+ENABLE_TUI=0
+OVERRIDE_PORT=""
+FETCH_URL_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes|--non-interactive)
+            AUTO_YES=1; shift ;;
+        --tui|--enable-tui)
+            ENABLE_TUI=1; shift ;;
+        --port)
+            OVERRIDE_PORT="$2"; shift 2 ;;
+        --fetch-url)
+            FETCH_URL_OVERRIDE="$2"; shift 2 ;;
+        -h|--help)
+            cat <<USAGE
+Usage: $0 [options]
+Options:
+  -y, --yes, --non-interactive   Run with defaults (accept prompts)
+  --tui, --enable-tui            Build and install ncurses TUI (requires ncurses)
+  --port <n>                     Use specific port for embedded web API
+  --fetch-url <url>              Use a specific remote URL to fetch sources
+  -h, --help                     Show this help
+USAGE
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# Interactive installer for cpu_throttle
+# - can fetch release from a server (tarball/zip)
+# - offers to install build dependencies (asks first)
+# - builds using Makefile if present, otherwise compiles main sources
+# - asks whether to enable web API and configure firewall
+# - creates a systemd service and starts/enables it
+
+BINARY_NAME="cpu_throttle"
+CTL_BINARY_NAME="cpu_throttle_ctl"
 SOURCE_FILE="cpu_throttle.c"
 CTL_SOURCE_FILE="cpu_throttle_ctl.c"
 BUILD_PATH="/usr/local/bin/$BINARY_NAME"
 CTL_BUILD_PATH="/usr/local/bin/$CTL_BINARY_NAME"
 SERVICE_PATH="/etc/systemd/system/$BINARY_NAME.service"
 
-# Function: Detect package manager
+cleanup() {
+    if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
+        rm -rf "$TMPDIR"
+    fi
+}
+trap cleanup EXIT
+
 detect_package_manager() {
     if command -v apt-get &>/dev/null; then
         echo "apt-get"
@@ -28,178 +74,450 @@ detect_package_manager() {
     fi
 }
 
-# Function: Install package
 install_package() {
-    local pkg="$1"
+    local pkgs=("$@")
     case "$PKG_MANAGER" in
-        apt-get) sudo apt-get update && sudo apt-get install -y "$pkg" ;;
-        dnf) sudo dnf install -y "$pkg" ;;
-        yum) sudo yum install -y "$pkg" ;;
-        pacman) sudo pacman -Sy --noconfirm "$pkg" ;;
-        zypper) sudo zypper install -y "$pkg" ;;
-        apk) sudo apk add --no-cache "$pkg" ;;
-        *) echo "❌ No supported package manager found."; exit 1 ;;
+        apt-get)
+            sudo apt-get update -y
+            sudo apt-get install -y "${pkgs[@]}"
+            ;;
+        dnf)
+            sudo dnf install -y "${pkgs[@]}"
+            ;;
+        yum)
+            sudo yum install -y "${pkgs[@]}"
+            ;;
+        pacman)
+            sudo pacman -Sy --noconfirm "${pkgs[@]}"
+            ;;
+        zypper)
+            sudo zypper install -y "${pkgs[@]}"
+            ;;
+        apk)
+            sudo apk add --no-cache "${pkgs[@]}"
+            ;;
+        *)
+            echo "No supported package manager detected; cannot install ${pkgs[*]}." >&2
+            return 1
+            ;;
     esac
 }
 
-# Function: Install build dependencies
-install_build_deps() {
+# Check whether a package is already installed for the detected package manager
+has_package() {
+    local pkg="$1"
     case "$PKG_MANAGER" in
         apt-get)
-            if ! dpkg -s build-essential &>/dev/null; then
-                echo "📦 Installing build-essential..."
-                install_package build-essential
-            fi
+            dpkg -s "$pkg" >/dev/null 2>&1 && return 0 || return 1
             ;;
         dnf|yum)
-            # Check for glibc-devel
-            if ! rpm -q glibc-devel &>/dev/null; then
-                echo "📦 Installing development tools..."
-                if [[ "$PKG_MANAGER" == "dnf" ]]; then
-                    sudo dnf groupinstall -y "Development Tools" || install_package glibc-devel
-                else
-                    sudo yum groupinstall -y "Development Tools" || install_package glibc-devel
-                fi
-            fi
+            rpm -q "$pkg" >/dev/null 2>&1 && return 0 || return 1
             ;;
         pacman)
-            if ! pacman -Qi base-devel &>/dev/null; then
-                echo "📦 Installing base-devel..."
-                install_package base-devel
-            fi
+            pacman -Qi "$pkg" >/dev/null 2>&1 && return 0 || return 1
             ;;
         zypper)
-            if ! rpm -q glibc-devel &>/dev/null; then
-                echo "📦 Installing development tools..."
-                sudo zypper install -y -t pattern devel_basis || install_package glibc-devel
-            fi
+            rpm -q "$pkg" >/dev/null 2>&1 && return 0 || return 1
             ;;
         apk)
-            # Alpine needs build-base for full build environment
-            if ! apk info -e build-base &>/dev/null; then
-                echo "📦 Installing build-base..."
-                install_package build-base
-            fi
+            apk info -e "$pkg" >/dev/null 2>&1 && return 0 || return 1
+            ;;
+        *)
+            return 1
             ;;
     esac
+}
+
+# Detect whether ncurses headers/libraries are already available
+has_ncurses() {
+    # Prefer pkg-config
+    if command -v pkg-config &>/dev/null && pkg-config --exists ncurses; then
+        return 0
+    fi
+    # Try compiling a tiny test program that includes <ncurses.h>
+    if command -v gcc &>/dev/null; then
+        if printf '%s
+' '#include <ncurses.h>' 'int main(void){return 0;}' | gcc -x c - -o /dev/null - >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
 echo "🔍 Detecting package manager..."
 PKG_MANAGER=$(detect_package_manager)
-
 if [[ -z "$PKG_MANAGER" ]]; then
-    echo "❌ No supported package manager detected."
-    exit 1
+    echo "⚠️  No supported package manager detected. You can still build from source, but dependency installation won't be automatic."
 else
     echo "✅ Detected package manager: $PKG_MANAGER"
 fi
 
-# Step 0: Check for dependencies
-if ! command -v gcc &>/dev/null; then
-    echo "🧱 GCC not found – attempting installation..."
-    install_package gcc
+# --- Optionally fetch files from server ---
+if [[ "$AUTO_YES" -eq 1 ]]; then
+    FETCH_ANS=Y
+else
+    read -r -p "Fetch source files from remote server? [y/N]: " FETCH_ANS
+    FETCH_ANS=${FETCH_ANS:-N}
 fi
-
-# Install build dependencies (build-essential, glibc-devel, base-devel, etc.)
-echo "🔧 Checking build dependencies..."
-install_build_deps
-
-# Step 0.5: Check if service already exists
-SERVICE_EXISTS=false
-if systemctl list-unit-files | grep -q "^$BINARY_NAME.service"; then
-    SERVICE_EXISTS=true
-    echo "⚠️  Service $BINARY_NAME already exists!"
-    
-    # Stop the running service
-    if systemctl is-active --quiet "$BINARY_NAME.service"; then
-        echo "🛑 Stopping running service..."
-        sudo systemctl stop "$BINARY_NAME.service"
-    fi
-    
-    # Backup old service file
-    BACKUP_PATH="${SERVICE_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
-    if [[ -f "$SERVICE_PATH" ]]; then
-        echo "💾 Backing up old service file to: $BACKUP_PATH"
-        sudo cp "$SERVICE_PATH" "$BACKUP_PATH"
-    fi
-fi
-
-# Step 1: Compile
-echo "🛠️ Compiling C programs..."
-
-# Compile main daemon
-gcc -O2 -o "$BINARY_NAME" "$SOURCE_FILE" || {
-    echo "❌ Compilation of $SOURCE_FILE failed!"
-    exit 1
-}
-
-# Compile control utility
-gcc -O2 -o "$CTL_BINARY_NAME" "$CTL_SOURCE_FILE" || {
-    echo "❌ Compilation of $CTL_SOURCE_FILE failed!"
-    exit 1
-}
-
-# Install binaries
-sudo mv "$BINARY_NAME" "$BUILD_PATH"
-sudo mv "$CTL_BINARY_NAME" "$CTL_BUILD_PATH"
-sudo chmod +x "$BUILD_PATH"
-sudo chmod +x "$CTL_BUILD_PATH"
-
-echo "✅ Binaries installed:"
-echo "   - $BUILD_PATH (daemon)"
-echo "   - $CTL_BUILD_PATH (control utility)"
-
-# Step 2: Create systemd service
-# Ask user whether to enable web interface by default (writes /etc/cpu_throttle.conf)
-read -r -p "Enable web interface on port 8086 by default? [Y/n]: " ENABLE_WEB
-ENABLE_WEB=${ENABLE_WEB:-Y}
-if [[ "$ENABLE_WEB" =~ ^[Yy] ]]; then
-    echo "➡️ Enabling web interface by default (web_port=8086)"
-    # Ensure config directory and file, write or replace web_port value
-    sudo mkdir -p /etc
-    if sudo grep -q "^web_port=" /etc/cpu_throttle.conf 2>/dev/null; then
-        sudo sed -i "s/^web_port=.*/web_port=8086/" /etc/cpu_throttle.conf
+if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
+    if [[ -n "$FETCH_URL_OVERRIDE" ]]; then
+        REMOTE_URL="$FETCH_URL_OVERRIDE"
     else
-        echo "web_port=8086" | sudo tee -a /etc/cpu_throttle.conf > /dev/null
+        read -r -p "Enter tarball/zip URL (default: https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz): " REMOTE_URL
+        REMOTE_URL=${REMOTE_URL:-https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz}
+    fi
+    echo "➡️ Downloading $REMOTE_URL"
+    TMPDIR=$(mktemp -d)
+    if command -v curl &>/dev/null; then
+        curl -L --fail -o "$TMPDIR/archive" "$REMOTE_URL"
+    elif command -v wget &>/dev/null; then
+        wget -O "$TMPDIR/archive" "$REMOTE_URL"
+    else
+        echo "❌ Neither curl nor wget found; cannot download." >&2
+        exit 1
+    fi
+
+    # Extract
+    echo "➡️ Extracting archive to $TMPDIR"
+    filetype=$(file -b --mime-type "$TMPDIR/archive" || true)
+    case "$filetype" in
+        application/zip)
+            unzip -q "$TMPDIR/archive" -d "$TMPDIR" || { echo "❌ unzip failed"; exit 1; }
+            ;;
+        application/x-gzip|application/gzip)
+            tar -xzf "$TMPDIR/archive" -C "$TMPDIR" || { echo "❌ tar (gzip) extraction failed"; exit 1; }
+            ;;
+        application/x-bzip2)
+            tar -xjf "$TMPDIR/archive" -C "$TMPDIR" || { echo "❌ tar (bzip2) extraction failed"; exit 1; }
+            ;;
+        application/x-xz)
+            tar -xJf "$TMPDIR/archive" -C "$TMPDIR" || { echo "❌ tar (xz) extraction failed"; exit 1; }
+            ;;
+        application/x-tar)
+            tar -xf "$TMPDIR/archive" -C "$TMPDIR" || { echo "❌ tar extraction failed"; exit 1; }
+            ;;
+        text/html*)
+            echo "❌ Download looks like HTML (not an archive). The URL may have returned an HTML error/redirect page."
+            echo "Saved file head (first 200 bytes):" && head -c 200 "$TMPDIR/archive" | sed -n '1,200p'
+            exit 1
+            ;;
+        *)
+            # Fallback: try tar, then unzip
+            if tar -tf "$TMPDIR/archive" >/dev/null 2>&1; then
+                tar -xf "$TMPDIR/archive" -C "$TMPDIR" || { echo "❌ tar extraction failed"; exit 1; }
+            elif unzip -t "$TMPDIR/archive" >/dev/null 2>&1; then
+                unzip -q "$TMPDIR/archive" -d "$TMPDIR" || { echo "❌ unzip failed"; exit 1; }
+            else
+                echo "❌ Unknown archive format: $filetype"; head -c 200 "$TMPDIR/archive" | sed -n '1,200p'; exit 1
+            fi
+            ;;
+    esac
+
+    # Try to find directory with SOURCE_FILE
+    BUILD_DIR=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+    if [[ -z "$BUILD_DIR" ]]; then
+        echo "⚠️ Could not find $SOURCE_FILE in downloaded archive. Using current directory instead."
+        BUILD_DIR="$(pwd)"
+    else
+        echo "✅ Found source in: $BUILD_DIR"
     fi
 else
-    echo "➡️ Web interface will be disabled by default. You can enable later by editing /etc/cpu_throttle.conf or using --web-port"
+    BUILD_DIR="$(pwd)"
 fi
 
-# Firewall integration: ask to open port 8086 for common firewalls (ufw, firewalld)
-WEB_PORT=8086
+cd "$BUILD_DIR"
+
+# --- Offer to install build dependencies ---
+printf "\n🔧 Build dependencies required: gcc, make, pkg-config, python3, curl, git\n"
+if [[ "$ENABLE_TUI" -eq 1 ]]; then
+    echo " (TUI selected: will also require libncurses-dev/ncurses-devel)"
+else
+    echo
+fi
+
+if [[ "$AUTO_YES" -eq 1 ]]; then
+    INSTALL_DEPS=Y
+else
+    if [[ -n "$PKG_MANAGER" ]]; then
+        read -r -p "Install missing dependencies now? (will use $PKG_MANAGER) [Y/n]: " INSTALL_DEPS
+        INSTALL_DEPS=${INSTALL_DEPS:-Y}
+    else
+        read -r -p "Proceed to build without installing dependencies? (you may need to install them manually) [y/N]: " INSTALL_DEPS
+        INSTALL_DEPS=${INSTALL_DEPS:-N}
+    fi
+fi
+
+if [[ "$INSTALL_DEPS" =~ ^[Yy] ]]; then
+    case "$PKG_MANAGER" in
+        apt-get)
+            desired=(build-essential pkg-config python3 python3-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(libncurses-dev)
+            fi
+            ;;
+        dnf)
+            sudo dnf groupinstall -y "Development Tools" || true
+            desired=(pkgconf-pkg-config python3 python3-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(ncurses-devel)
+            fi
+            ;;
+        yum)
+            sudo yum groupinstall -y "Development Tools" || true
+            desired=(pkgconf-pkg-config python3 python3-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(ncurses-devel)
+            fi
+            ;;
+        pacman)
+            desired=(base-devel pkgconf python python-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(ncurses)
+            fi
+            ;;
+        zypper)
+            sudo zypper install -y -t pattern devel_C_C++ || true
+            desired=(pkg-config python3 python3-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(ncurses-devel)
+            fi
+            ;;
+        apk)
+            desired=(build-base pkgconfig python3 py3-pip curl git)
+            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                desired+=(ncurses-dev)
+            fi
+            ;;
+        *)
+            echo "Skipping automated dependency installation." ;;
+    esac
+
+    # Install only missing packages
+    if [[ ${#desired[@]} -gt 0 ]]; then
+        missing=()
+        for p in "${desired[@]}"; do
+            if ! has_package "$p"; then
+                missing+=("$p")
+            else
+                echo "ℹ️ Package '$p' already installed; skipping."
+            fi
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "➡️ Installing missing packages: ${missing[*]}"
+            install_package "${missing[@]}"
+        else
+            echo "✅ All required packages are already installed."
+        fi
+    fi
+fi
+
+# --- Build ---
+printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
+if [[ -f Makefile || -f makefile ]]; then
+    echo "➡️ Running 'make assets' then 'make' if available"
+    if make assets 2>/dev/null || true; then
+        echo "make assets executed (if present)"
+    fi
+    if make -j"$(nproc)" 2>/dev/null; then
+        echo "✅ make succeeded"
+        # If make didn't produce the expected binary, fall back to direct compile
+        if ! find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit >/dev/null 2>&1; then
+            echo "⚠️ 'make' did not produce $BINARY_NAME; falling back to direct compile"
+            BUILD_FALLBACK=true
+        fi
+    else
+        echo "⚠️ make failed or not available; falling back to direct compile"
+        BUILD_FALLBACK=true
+    fi
+else
+    BUILD_FALLBACK=true
+fi
+
+if [[ ${BUILD_FALLBACK:-false} == true ]]; then
+    echo "➡️ Compiling sources directly"
+    if [[ -f "$SOURCE_FILE" ]]; then
+        # Link ncurses only if TUI is requested or code requires it; safe to add if lib exists
+        TUI_LDFLAGS=""
+        if [[ "$ENABLE_TUI" -eq 1 ]]; then
+            TUI_LDFLAGS="-lncurses"
+        fi
+        gcc -O2 -Wall -Wextra -std=c11 -pthread -o "$BINARY_NAME" "$SOURCE_FILE" $TUI_LDFLAGS || { echo "❌ Failed to compile $SOURCE_FILE"; exit 1; }
+    else
+        echo "❌ $SOURCE_FILE not found in $BUILD_DIR"; exit 1
+    fi
+    if [[ -f "$CTL_SOURCE_FILE" ]]; then
+        gcc -O2 -Wall -Wextra -std=c11 -o "$CTL_BINARY_NAME" "$CTL_SOURCE_FILE" || echo "⚠️ Control utility not compiled (source missing)"
+    fi
+fi
+
+# If make produced binaries in subdir (e.g., bin/), try to locate them
+if [[ -f "$BINARY_NAME" ]]; then
+    SRC_BIN_PATH="$BUILD_DIR/$BINARY_NAME"
+else
+    SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit || true)
+fi
+if [[ -z "$SRC_BIN_PATH" ]]; then
+    echo "❌ Could not find built binary $BINARY_NAME"; exit 1
+fi
+
+echo "➡️ Installing binaries to /usr/local/bin (sudo required)"
+sudo cp "$SRC_BIN_PATH" "$BUILD_PATH"
+sudo chmod +x "$BUILD_PATH"
+if [[ -n "$CTL_BINARY_NAME" && -f "$CTL_BINARY_NAME" ]]; then
+    sudo cp "$CTL_BINARY_NAME" "$CTL_BUILD_PATH" || true
+    sudo chmod +x "$CTL_BUILD_PATH" || true
+fi
+
+# Optional: build/install TUI if requested
+if [[ "$ENABLE_TUI" -eq 1 ]]; then
+    printf "\n🖥️  Building/installing ncurses TUI (if source present)\n"
+    TUI_BIN_NAME="cpu_throttle_tui"
+    TUI_SRC1="cpu_throttle_tui.c"
+    TUI_SRC2="tui.c"
+    if [[ -f "$TUI_SRC1" ]]; then
+        gcc -O2 -Wall -Wextra -std=c11 -o "$TUI_BIN_NAME" "$TUI_SRC1" -lncurses || echo "⚠️ Failed to build TUI from $TUI_SRC1"
+    elif [[ -f "$TUI_SRC2" ]]; then
+        gcc -O2 -Wall -Wextra -std=c11 -o "$TUI_BIN_NAME" "$TUI_SRC2" -lncurses || echo "⚠️ Failed to build TUI from $TUI_SRC2"
+    else
+        # maybe make built it
+        TUI_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$TUI_BIN_NAME" -print -quit || true)
+        if [[ -n "$TUI_BIN_PATH" ]]; then
+            cp "$TUI_BIN_PATH" "$TUI_BIN_NAME" || true
+        else
+            echo "ℹ️ No TUI source or binary found; skipping TUI build."
+            TUI_BIN_NAME=""
+        fi
+    fi
+    if [[ -n "$TUI_BIN_NAME" && -f "$TUI_BIN_NAME" ]]; then
+        sudo cp "$TUI_BIN_NAME" "/usr/local/bin/$TUI_BIN_NAME" || true
+        sudo chmod +x "/usr/local/bin/$TUI_BIN_NAME" || true
+        echo "✅ Installed TUI: /usr/local/bin/$TUI_BIN_NAME"
+    fi
+fi
+
+echo "✅ Installed: $BUILD_PATH"
+
+# --- Web API / firewall / service ---
+if [[ "$AUTO_YES" -eq 1 ]]; then
+    ENABLE_WEB=Y
+else
+    read -r -p "Enable Web API (embedded dashboard) by default and open firewall port 8086? [y/N]: " ENABLE_WEB
+    ENABLE_WEB=${ENABLE_WEB:-N}
+fi
+
+port_in_use() {
+    local p="$1"
+    if command -v ss &>/dev/null; then
+        ss -ltn 2>/dev/null | awk '{print $4}' | sed -E 's/.*://g' | grep -x -- "$p" >/dev/null 2>&1 && return 0 || return 1
+    elif command -v netstat &>/dev/null; then
+        netstat -tln 2>/dev/null | awk '{print $4}' | sed -E 's/.*://g' | grep -x -- "$p" >/dev/null 2>&1 && return 0 || return 1
+    else
+        # Cannot reliably detect; assume free
+        return 1
+    fi
+}
+
+choose_available_port() {
+    local preferred=(8086 8286 8386 8486)
+    for p in "${preferred[@]}"; do
+        if ! port_in_use "$p"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    # none found; ask user
+    read -r -p "No preferred ports free. Enter custom port to use for web API: " custom
+    echo "$custom"
+}
+
 if [[ "$ENABLE_WEB" =~ ^[Yy] ]]; then
-    # Detect ufw
-    if command -v ufw &>/dev/null; then
-        read -r -p "Detected ufw firewall. Open port ${WEB_PORT}/tcp? [Y/n]: " UFW_ANSWER
-        UFW_ANSWER=${UFW_ANSWER:-Y}
-        if [[ "$UFW_ANSWER" =~ ^[Yy] ]]; then
-            echo "➡️ Adding ufw rule for port ${WEB_PORT}/tcp"
-            sudo ufw allow ${WEB_PORT}/tcp
+    # If user passed --port, use it (but warn if in use)
+    if [[ -n "$OVERRIDE_PORT" ]]; then
+        WEB_PORT="$OVERRIDE_PORT"
+        if port_in_use "$WEB_PORT"; then
+            echo "⚠️ Requested port $WEB_PORT appears to be in use. Aborting web API enablement.";
+            WEB_PORT=""
+        fi
+    else
+        # pick a port (prefer 8086) but ensure it's free
+        if port_in_use 8086; then
+            echo "⚠️ Port 8086 appears to be in use. Selecting an alternative..."
+            WEB_PORT=$(choose_available_port)
+            if [[ -z "$WEB_PORT" ]]; then
+                echo "❌ No port selected. Aborting web API enablement.";
+            else
+                if [[ "$AUTO_YES" -eq 1 ]]; then
+                    USE_ALT=Y
+                else
+                    read -r -p "Use port ${WEB_PORT} for the Web API? [Y/n]: " USE_ALT
+                    USE_ALT=${USE_ALT:-Y}
+                fi
+                if [[ ! "$USE_ALT" =~ ^[Yy] ]]; then
+                    if [[ "$AUTO_YES" -eq 1 ]]; then
+                        echo "Auto-yes enabled; using ${WEB_PORT}"
+                    else
+                        read -r -p "Enter desired port for Web API: " WEB_PORT
+                    fi
+                fi
+            fi
+        else
+            WEB_PORT=8086
         fi
     fi
 
-    # Detect firewalld
-    if command -v firewall-cmd &>/dev/null; then
-        read -r -p "Detected firewalld. Open port ${WEB_PORT}/tcp (permanent)? [Y/n]: " FWD_ANSWER
-        FWD_ANSWER=${FWD_ANSWER:-Y}
-        if [[ "$FWD_ANSWER" =~ ^[Yy] ]]; then
-            echo "➡️ Adding firewalld rule for port ${WEB_PORT}/tcp"
-            sudo firewall-cmd --permanent --add-port=${WEB_PORT}/tcp
-            sudo firewall-cmd --reload
+    if [[ -n "${WEB_PORT:-}" ]]; then
+        echo "➡️ Enabling web API in config (/etc/cpu_throttle.conf) with port ${WEB_PORT}"
+        sudo mkdir -p /etc
+        if sudo grep -q "^web_port=" /etc/cpu_throttle.conf 2>/dev/null; then
+            sudo sed -i "s/^web_port=.*/web_port=${WEB_PORT}/" /etc/cpu_throttle.conf || true
+        else
+            echo "web_port=${WEB_PORT}" | sudo tee -a /etc/cpu_throttle.conf > /dev/null
         fi
-    fi
 
-    # If neither firewall detected, print hint
-    if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
-        echo "ℹ️ No ufw or firewalld detected. If you run a different firewall, please open port ${WEB_PORT}/tcp manually."
+        # Firewall rules
+        if command -v ufw &>/dev/null; then
+            if [[ "$AUTO_YES" -eq 1 ]]; then
+                UFW_ANS=Y
+            else
+                read -r -p "Detected ufw. Add rule to allow ${WEB_PORT}/tcp? [Y/n]: " UFW_ANS
+                UFW_ANS=${UFW_ANS:-Y}
+            fi
+            if [[ "$UFW_ANS" =~ ^[Yy] ]]; then
+                sudo ufw allow ${WEB_PORT}/tcp || true
+            fi
+        fi
+        if command -v firewall-cmd &>/dev/null; then
+            if [[ "$AUTO_YES" -eq 1 ]]; then
+                FWD_ANS=Y
+            else
+                read -r -p "Detected firewalld. Add permanent rule for ${WEB_PORT}/tcp? [Y/n]: " FWD_ANS
+                FWD_ANS=${FWD_ANS:-Y}
+            fi
+            if [[ "$FWD_ANS" =~ ^[Yy] ]]; then
+                sudo firewall-cmd --permanent --add-port=${WEB_PORT}/tcp || true
+                sudo firewall-cmd --reload || true
+            fi
+        fi
+        if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
+            echo "ℹ️ No ufw/firewalld detected. Please open port ${WEB_PORT}/tcp in your firewall if needed."
+        fi
     fi
 fi
 
-cat << EOF | sudo tee "$SERVICE_PATH" > /dev/null
+# Prepare systemd service
+SERVICE_EXISTS=false
+if systemctl list-unit-files | grep -q "^${BINARY_NAME}\.service"; then
+    SERVICE_EXISTS=true
+    echo "⚠️  Service ${BINARY_NAME} already exists; will back it up before replacing."
+    if [[ -f "$SERVICE_PATH" ]]; then
+        sudo cp "$SERVICE_PATH" "${SERVICE_PATH}.backup.$(date +%Y%m%d_%H%M%S)" || true
+    fi
+fi
+
+cat <<EOF | sudo tee "$SERVICE_PATH" > /dev/null
 [Unit]
-Description=Temperature-based CPU frequency scaling daemon
-After=multi-user.target
+Description=cpu_throttle daemon (temperature-based CPU governor)
+After=network.target
 
 [Service]
 Type=simple
@@ -211,38 +529,20 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Step 3: Enable and start service
-sudo systemctl daemon-reexec
+sudo systemctl daemon-reload || true
+sudo systemctl enable --now "$BINARY_NAME".service || true
 
 if [[ "$SERVICE_EXISTS" == true ]]; then
-    echo "🔄 Restarting existing service..."
-    sudo systemctl enable "$BINARY_NAME.service"
-    sudo systemctl restart "$BINARY_NAME.service"
-else
-    echo "🚀 Enabling and starting new service..."
-    sudo systemctl enable "$BINARY_NAME.service"
-    sudo systemctl start "$BINARY_NAME.service"
+    echo "🔄 Replaced existing service $BINARY_NAME"
 fi
 
-# Wait a moment and check if service started successfully
-sleep 1
-if systemctl is-active --quiet "$BINARY_NAME.service"; then
-    echo ""
-    echo "✅ Service $BINARY_NAME has been successfully installed and started!"
+if systemctl is-active --quiet "$BINARY_NAME".service; then
+    echo "✅ Service $BINARY_NAME enabled and running"
 else
-    echo ""
-    echo "⚠️  Service installed but may have failed to start. Check logs:"
-    echo "   sudo journalctl -u $BINARY_NAME -n 20"
+    echo "⚠️ Service $BINARY_NAME not running; check 'sudo journalctl -u $BINARY_NAME -n 50'"
 fi
 
-echo ""
-echo "📋 Usage:"
-echo "   - Control daemon: $CTL_BINARY_NAME <command>"
-echo "   - Show status:    $CTL_BINARY_NAME status"
-echo "   - Set max freq:   $CTL_BINARY_NAME set-safe-max 4000000"
-echo "   - Set min freq:   $CTL_BINARY_NAME set-safe-min 2000000"
-echo "   - Set max temp:   $CTL_BINARY_NAME set-temp-max 85"
-echo "   - Quit daemon:    $CTL_BINARY_NAME quit"
-echo ""
-echo "📊 Check service status: sudo systemctl status $BINARY_NAME"
-echo "📜 View logs:           sudo journalctl -u $BINARY_NAME -f"
+printf "\n🎉 Installation complete.\n"
+echo " - Binary: $BUILD_PATH"
+echo " - Service: $SERVICE_PATH"
+echo "To control the daemon: sudo $CTL_BUILD_PATH <command> (if installed)"
