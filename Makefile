@@ -70,6 +70,7 @@ SRCS := cpu_throttle.c cpu_throttle_tui.c cpu_throttle_ctl.c
 TARGETS := cpu_throttle cpu_throttle_tui cpu_throttle_ctl
 
 .PHONY: all
+.DEFAULT_GOAL := all
 all: assets $(TARGETS)
 
 cpu_throttle: cpu_throttle.c
