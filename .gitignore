@@ -1,0 +1,39 @@
+# Ignore common editor and OS files
+.vscode/
+.DS_Store
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Save archive created during work
+/save.zip
+
+# Build artifacts / compiled binaries
+# These binaries are created during local builds; use a release/ directory for published artifacts
+cpu_throttle
+cpu_throttle_test
+cpu_throttle_ctl
+cpu_throttle_tui
+cpu_throttle_restored
+
+# Object files, coverage, and temporary build files
+*.o
+*.a
+*.so
+*.dSYM/
+*.gcda
+*.gcno
+
+# Temporary files
+/tmp/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Optional: generated C headers for embedded assets are often committed intentionally.
+# If you prefer NOT to commit generated headers, uncomment the next line to ignore them:
+# include/*.h
