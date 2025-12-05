@@ -6,6 +6,8 @@ AUTO_YES=0
 ENABLE_TUI=0
 OVERRIDE_PORT=""
 FETCH_URL_OVERRIDE=""
+FORCE_BUILD=0
+FORCE_BINARIES=0
 
 # Release configuration: by default installer will try to use the latest
 # release binary from GitHub Releases. If you want to pin a tag, set
@@ -20,6 +22,10 @@ while [[ $# -gt 0 ]]; do
             AUTO_YES=1; shift ;;
         --tui|--enable-tui)
             ENABLE_TUI=1; shift ;;
+        --force-build)
+            FORCE_BUILD=1; shift ;;
+        --force-binaries)
+            FORCE_BINARIES=1; shift ;;
         --port)
             OVERRIDE_PORT="$2"; shift 2 ;;
         --fetch-url)
@@ -31,8 +37,10 @@ Options:
   -y, --yes, --non-interactive   Run with defaults (accept prompts)
   --tui, --enable-tui            Build and install ncurses TUI (requires ncurses)
   --port <n>                     Use specific port for embedded web API
-  --fetch-url <url>              Use a specific remote URL to fetch sources
-  -h, --help                     Show this help
+    --fetch-url <url>              Use a specific remote URL to fetch sources
+    --force-build                   Always build from source (do not use prebuilt binaries)
+    --force-binaries                Always install prebuilt binaries if available
+    -h, --help                     Show this help
 USAGE
             exit 0
             ;;
@@ -344,6 +352,34 @@ if [[ -n "${SRC_BIN_PATH:-}" && -z "${CTL_BIN_SRC:-}" && -n "${REMOTE_URL:-}" ]]
 fi
 
 cd "$BUILD_DIR"
+# Decide whether to use prebuilt binaries or build from source
+ACTION=""
+if [[ "$FORCE_BUILD" -eq 1 ]]; then
+    ACTION="build"
+elif [[ "$FORCE_BINARIES" -eq 1 ]]; then
+    ACTION="install"
+elif [[ -n "${SRC_BIN_PATH:-}" || -n "${PREBUILT_MAIN:-}" ]]; then
+    # Prebuilt binaries detected
+    if [[ "$AUTO_YES" -eq 1 ]]; then
+        ACTION="install"
+    else
+        # Ask the user whether to install binaries or build from source
+        read -r -p "Prebuilt binaries detected. Install binaries or build from source? [I/b] (default: Install): " USE_CHOICE
+        USE_CHOICE=${USE_CHOICE:-I}
+        if [[ "$USE_CHOICE" =~ ^[Bb] ]]; then
+            ACTION="build"
+        else
+            ACTION="install"
+        fi
+    fi
+fi
+
+# If user chose to install binaries, skip dependency installation and build steps
+if [[ "$ACTION" == "install" ]]; then
+    SKIP_BUILD=true
+else
+    SKIP_BUILD=${SKIP_BUILD:-false}
+fi
 
 # --- Offer to install build dependencies ---
 printf "\n🔧 Build dependencies required: gcc, make, pkg-config, python3, curl, git\n"
