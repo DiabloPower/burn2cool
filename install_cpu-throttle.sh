@@ -7,6 +7,13 @@ ENABLE_TUI=0
 OVERRIDE_PORT=""
 FETCH_URL_OVERRIDE=""
 
+# Release configuration: by default installer will try to use the latest
+# release binary from GitHub Releases. If you want to pin a tag, set
+# `RELEASE_TAG` to something like "v3.0". Change `PREFERRED_ASSET_NAME`
+# if your release asset has a different filename.
+RELEASE_TAG=""                # empty = use latest
+PREFERRED_ASSET_NAME="cpu_throttle"  # asset name to look for in release assets
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes|--non-interactive)
@@ -163,8 +170,43 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
     if [[ -n "$FETCH_URL_OVERRIDE" ]]; then
         REMOTE_URL="$FETCH_URL_OVERRIDE"
     else
-        read -r -p "Enter tarball/zip URL (default: https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz): " REMOTE_URL
-        REMOTE_URL=${REMOTE_URL:-https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz}
+        # If no explicit URL provided, try to detect latest release asset from GitHub
+        detect_release_asset() {
+            local api_url
+            if [[ -n "${RELEASE_TAG:-}" ]]; then
+                api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/tags/${RELEASE_TAG}"
+            else
+                api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/latest"
+            fi
+            if ! command -v curl >/dev/null 2>&1; then
+                return 1
+            fi
+            # Fetch release JSON and extract browser_download_url lines
+            local urls
+            urls=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p') || return 1
+            if [[ -z "$urls" ]]; then
+                return 1
+            fi
+            # Prefer asset names that match PREFERRED_ASSET_NAME
+            local match
+            match=$(echo "$urls" | grep -i "/${PREFERRED_ASSET_NAME}\(\.|$\)" | head -n1 || true)
+            if [[ -n "$match" ]]; then
+                echo "$match"
+                return 0
+            fi
+            # Otherwise fall back to first asset URL
+            echo "$(echo "$urls" | head -n1)"
+            return 0
+        }
+
+        auto_url=""
+        if auto_url=$(detect_release_asset) && [[ -n "$auto_url" ]]; then
+            REMOTE_URL="$auto_url"
+            echo "➡️ Auto-detected release asset: $REMOTE_URL"
+        else
+            read -r -p "Enter tarball/zip or binary URL (default: https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz): " REMOTE_URL
+            REMOTE_URL=${REMOTE_URL:-https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz}
+        fi
     fi
     echo "➡️ Downloading $REMOTE_URL"
     TMPDIR=$(mktemp -d)
