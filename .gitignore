@@ -30,6 +30,10 @@ cpu_throttle_restored
 /tmp/
 *.log
 
+# Local test / program output files
+# These `.out` files are usually build/test output and shouldn't be tracked.
+*.out
+
 # Python
 __pycache__/
 *.py[cod]
