@@ -218,10 +218,25 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
         echo "❌ Neither curl nor wget found; cannot download." >&2
         exit 1
     fi
-
-    # Extract
-    echo "➡️ Extracting archive to $TMPDIR"
+    # Detect if the downloaded file is a direct binary (ELF) and skip extraction
+    filedesc=$(file -b "$TMPDIR/archive" || true)
     filetype=$(file -b --mime-type "$TMPDIR/archive" || true)
+    if echo "$filedesc" | grep -qi 'elf'; then
+        echo "➡️ Detected ELF/binary download; will install directly from downloaded file"
+        SRC_BIN_PATH="$TMPDIR/archive"
+        SKIP_EXTRACTION=1
+    else
+        SKIP_EXTRACTION=0
+    fi
+
+    # Extract (only if not an ELF/binary)
+    if [[ "$SKIP_EXTRACTION" -ne 1 ]]; then
+        echo "➡️ Extracting archive to $TMPDIR"
+        filetype="$filetype"
+    else
+        echo "➡️ Skipping extraction for binary download"
+    fi
+    if [[ "$SKIP_EXTRACTION" -ne 1 ]]; then
     case "$filetype" in
         application/zip)
             unzip -q "$TMPDIR/archive" -d "$TMPDIR" || { echo "❌ unzip failed"; exit 1; }
@@ -254,6 +269,7 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
             fi
             ;;
     esac
+    fi
 
     # Try to find directory with SOURCE_FILE
     BUILD_DIR=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
