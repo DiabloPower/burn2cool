@@ -632,6 +632,10 @@ if [[ "$ACTION" == "build" ]]; then
         fi
         if [[ "$TRY_DL" =~ ^[Yy] ]]; then
             echo "➡️ Trying to locate a source archive for the release..."
+            # Ensure TMPDIR exists for interactive download attempts
+            if [[ -z "${TMPDIR:-}" || ! -d "${TMPDIR:-}" ]]; then
+                TMPDIR=$(mktemp -d) || { echo "❌ Could not create temporary directory for downloads"; exit 1; }
+            fi
             rel_tag=""
             if [[ -n "${REMOTE_URL:-}" && "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
                 rel_tag="${BASH_REMATCH[1]}"
