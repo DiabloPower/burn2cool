@@ -887,9 +887,13 @@ if [[ "$SKIP_BUILD" != true ]]; then
 
     # If make produced binaries in subdir (e.g., bin/), try to locate them
     if [[ -f "$BINARY_NAME" ]]; then
-        SRC_BIN_PATH="$BUILD_DIR/$BINARY_NAME"
+        # If compilation happened in a nested directory (we may have cd'd into it),
+        # prefer the binary in the current working directory so we don't assume
+        # it's at the top-level $BUILD_DIR.
+        SRC_BIN_PATH="$(pwd)/$BINARY_NAME"
     else
-        SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit || true)
+        # Allow a slightly deeper search for build outputs produced in subdirs
+        SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$BINARY_NAME" -print -quit || true)
     fi
     if [[ -z "$SRC_BIN_PATH" ]]; then
         echo "❌ Could not find built binary $BINARY_NAME"; exit 1
