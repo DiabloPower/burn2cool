@@ -2,6 +2,10 @@
 set -euo pipefail
 
 
+# Default to non-interactive prompts disabled; set to 1 with -y/--yes
+AUTO_YES=0
+
+
 # Regenerate embedded asset headers from the assets/ directory.
 # Minimal implementation using `xxd -i` (falls back to a placeholder favicon header).
 regenerate_asset_headers() {
