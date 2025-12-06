@@ -666,7 +666,21 @@ if [[ "$ACTION" == "build" ]]; then
                         if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
                             extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
                             if [[ -n "$extracted_dir" ]]; then
-                                BUILD_DIR="$extracted_dir"
+                                # Prefer an ancestor directory that contains a Makefile
+                                real_build_dir="$extracted_dir"
+                                cur_dir="$extracted_dir"
+                                while :; do
+                                    if [[ -f "$cur_dir/Makefile" || -f "$cur_dir/makefile" ]]; then
+                                        real_build_dir="$cur_dir"
+                                        break
+                                    fi
+                                    # stop at TMPDIR root or filesystem root
+                                    if [[ "${cur_dir%/}" == "${TMPDIR%/}" || "$cur_dir" == "/" ]]; then
+                                        break
+                                    fi
+                                    cur_dir=$(dirname "$cur_dir")
+                                done
+                                BUILD_DIR="$real_build_dir"
                                 echo "✅ Found source in downloaded archive: $BUILD_DIR"
                                 cd "$BUILD_DIR"
                                 tried_src=1
@@ -675,7 +689,19 @@ if [[ "$ACTION" == "build" ]]; then
                         elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
                             extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
                             if [[ -n "$extracted_dir" ]]; then
-                                BUILD_DIR="$extracted_dir"
+                                real_build_dir="$extracted_dir"
+                                cur_dir="$extracted_dir"
+                                while :; do
+                                    if [[ -f "$cur_dir/Makefile" || -f "$cur_dir/makefile" ]]; then
+                                        real_build_dir="$cur_dir"
+                                        break
+                                    fi
+                                    if [[ "${cur_dir%/}" == "${TMPDIR%/}" || "$cur_dir" == "/" ]]; then
+                                        break
+                                    fi
+                                    cur_dir=$(dirname "$cur_dir")
+                                done
+                                BUILD_DIR="$real_build_dir"
                                 echo "✅ Found source in downloaded archive: $BUILD_DIR"
                                 cd "$BUILD_DIR"
                                 tried_src=1
@@ -701,7 +727,19 @@ if [[ "$ACTION" == "build" ]]; then
                             if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
                                 extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
                                 if [[ -n "$extracted_dir" ]]; then
-                                    BUILD_DIR="$extracted_dir"
+                                    real_build_dir="$extracted_dir"
+                                    cur_dir="$extracted_dir"
+                                    while :; do
+                                        if [[ -f "$cur_dir/Makefile" || -f "$cur_dir/makefile" ]]; then
+                                            real_build_dir="$cur_dir"
+                                            break
+                                        fi
+                                        if [[ "${cur_dir%/}" == "${TMPDIR%/}" || "$cur_dir" == "/" ]]; then
+                                            break
+                                        fi
+                                        cur_dir=$(dirname "$cur_dir")
+                                    done
+                                    BUILD_DIR="$real_build_dir"
                                     echo "✅ Found source in downloaded archive: $BUILD_DIR"
                                     cd "$BUILD_DIR"
                                     tried_src=1
