@@ -494,6 +494,9 @@ fi
 # If user chose to install binaries, skip dependency installation and build steps
 if [[ "$ACTION" == "install" ]]; then
     SKIP_BUILD=true
+elif [[ "$ACTION" == "build" ]]; then
+    # User explicitly requested a build
+    SKIP_BUILD=false
 else
     # If --force-build was specified, ensure we do not skip building even
     # if an ELF/prebuilt binary was detected earlier.

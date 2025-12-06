@@ -7,16 +7,18 @@
 venv/
 env/
 
+# Wiki files
+WIKI_DRAFT
+
 # Save archive created during work
-/save.zip
+*.zip
+*.tar.gz
 
 # Build artifacts / compiled binaries
 # These binaries are created during local builds; use a release/ directory for published artifacts
 cpu_throttle
-cpu_throttle_test
 cpu_throttle_ctl
 cpu_throttle_tui
-cpu_throttle_restored
 
 # Object files, coverage, and temporary build files
 *.o
