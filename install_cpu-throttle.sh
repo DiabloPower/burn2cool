@@ -8,6 +8,7 @@ OVERRIDE_PORT=""
 FETCH_URL_OVERRIDE=""
 FORCE_BUILD=0
 FORCE_BINARIES=0
+INSTALL_TUI=0
 
 # Release configuration: by default installer will try to use the latest
 # release binary from GitHub Releases. If you want to pin a tag, set
@@ -27,6 +28,8 @@ while [[ $# -gt 0 ]]; do
             FORCE_BUILD=1; shift ;;
         --force-binaries)
             FORCE_BINARIES=1; shift ;;
+        --install-tui)
+            INSTALL_TUI=1; shift ;;
         --port)
             OVERRIDE_PORT="$2"; shift 2 ;;
         --fetch-url)
@@ -64,6 +67,8 @@ CTL_SOURCE_FILE="cpu_throttle_ctl.c"
 BUILD_PATH="/usr/local/bin/$BINARY_NAME"
 CTL_BUILD_PATH="/usr/local/bin/$CTL_BINARY_NAME"
 SERVICE_PATH="/etc/systemd/system/$BINARY_NAME.service"
+TUI_BIN_NAME="cpu_throttle_tui"
+TUI_BUILD_PATH="/usr/local/bin/$TUI_BIN_NAME"
 
 cleanup() {
     if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
@@ -327,6 +332,12 @@ if [[ "$SKIP_BUILD" != true ]]; then
         echo "✅ Found prebuilt control binary in archive: $PREBUILT_CTL"
         CTL_BIN_SRC="$PREBUILT_CTL"
     fi
+    # Also detect prebuilt TUI binary in the archive
+    PREBUILT_TUI=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$TUI_BIN_NAME" -print -quit || true)
+    if [[ -n "$PREBUILT_TUI" ]]; then
+        echo "✅ Found prebuilt TUI binary in archive: $PREBUILT_TUI"
+        TUI_BIN_SRC="$PREBUILT_TUI"
+    fi
 fi
 
 # If we have a downloaded single binary (SRC_BIN_PATH) and no ctl binary found,
@@ -348,12 +359,21 @@ if [[ -n "${SRC_BIN_PATH:-}" && -z "${CTL_BIN_SRC:-}" && -n "${REMOTE_URL:-}" ]]
             assets=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p' || true)
             if [[ -n "$assets" ]]; then
                 ctl_url=$(echo "$assets" | grep -i "/${CTL_BINARY_NAME}\(\.|$\)" | head -n1 || true)
+                tui_url=$(echo "$assets" | grep -i "/${TUI_BIN_NAME}\(\.|$\)" | head -n1 || true)
                 if [[ -n "$ctl_url" ]]; then
                     echo "➡️ Downloading companion control binary: $ctl_url"
                     if command -v curl >/dev/null 2>&1; then
                         curl -fSL -o "$TMPDIR/${CTL_BINARY_NAME}" "$ctl_url" || true
                         chmod +x "$TMPDIR/${CTL_BINARY_NAME}" || true
                         CTL_BIN_SRC="$TMPDIR/${CTL_BINARY_NAME}"
+                    fi
+                fi
+                if [[ -n "$tui_url" ]]; then
+                    echo "➡️ Downloading companion TUI binary: $tui_url"
+                    if command -v curl >/dev/null 2>&1; then
+                        curl -fSL -o "$TMPDIR/${TUI_BIN_NAME}" "$tui_url" || true
+                        chmod +x "$TMPDIR/${TUI_BIN_NAME}" || true
+                        TUI_BIN_SRC="$TMPDIR/${TUI_BIN_NAME}"
                     fi
                 fi
             fi
@@ -573,6 +593,21 @@ if [[ -z "${CTL_BIN_SRC:-}" ]]; then
 fi
 if [[ -n "${CTL_BIN_SRC:-}" && -f "$CTL_BIN_SRC" ]]; then
     install_binary "$CTL_BIN_SRC" "$CTL_BUILD_PATH" || true
+fi
+
+# Install prebuilt TUI if requested or if ENABLE_TUI build produced one
+if [[ -n "${TUI_BIN_SRC:-}" && -f "$TUI_BIN_SRC" ]]; then
+    # If user explicitly asked to install TUI or auto-yes, or if they selected install and prebuilt exists
+    if [[ "$INSTALL_TUI" -eq 1 || "$AUTO_YES" -eq 1 || "$SKIP_BUILD" == true ]]; then
+        echo "➡️ Installing TUI binary to $TUI_BUILD_PATH"
+        install_binary "$TUI_BIN_SRC" "$TUI_BUILD_PATH" || true
+    else
+        read -r -p "Install companion TUI binary ($TUI_BIN_NAME)? [y/N]: " INSTALL_TUI_ANS
+        INSTALL_TUI_ANS=${INSTALL_TUI_ANS:-N}
+        if [[ "$INSTALL_TUI_ANS" =~ ^[Yy] ]]; then
+            install_binary "$TUI_BIN_SRC" "$TUI_BUILD_PATH" || true
+        fi
+    fi
 fi
 
 # Optional: build/install TUI if requested
