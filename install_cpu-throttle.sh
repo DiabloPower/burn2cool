@@ -898,6 +898,12 @@ if [[ "$SKIP_BUILD" != true ]]; then
             echo "➡️ Removing pre-generated include headers to force regeneration"
             rm -f include/*.h || true
         fi
+        # Run 'make clean' to ensure stale build artefacts don't affect the
+        # regenerated assets and final binary. This makes interactive builds
+        # consistent with forced build path.
+        if make clean 2>/dev/null || true; then
+            echo "make clean executed (if present)"
+        fi
         if make assets || true; then
             echo "make assets executed (if present)"
         fi
@@ -956,6 +962,13 @@ if [[ "$SKIP_BUILD" != true ]]; then
     else
         # Allow a slightly deeper search for build outputs produced in subdirs
         SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$BINARY_NAME" -print -quit || true)
+    fi
+    # Print sha256sum of the built binary (if found) so user can compare
+    # interactive vs --force-build outputs for debugging reproducibility.
+    if [[ -n "${SRC_BIN_PATH:-}" && -f "$SRC_BIN_PATH" ]]; then
+        if command -v sha256sum &>/dev/null; then
+            echo "➡️ Built binary sha256: $(sha256sum "$SRC_BIN_PATH" | awk '{print $1}')"
+        fi
     fi
     if [[ -z "$SRC_BIN_PATH" ]]; then
         echo "❌ Could not find built binary $BINARY_NAME"; exit 1
