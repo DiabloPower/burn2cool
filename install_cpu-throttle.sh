@@ -238,12 +238,25 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
         }
 
         auto_url=""
-        if auto_url=$(detect_release_asset) && [[ -n "$auto_url" ]]; then
-            REMOTE_URL="$auto_url"
-            echo "➡️ Auto-detected release asset: $REMOTE_URL"
+        # If the user explicitly requested a force-build, prefer attempting
+        # to download the repository source archive (tag or main branch) first
+        # instead of fetching a prebuilt asset. This avoids downloading a
+        # prebuilt binary only to then re-download the source archive.
+        if [[ "${FORCE_BUILD:-0}" -eq 1 ]]; then
+            if [[ -n "${RELEASE_TAG:-}" ]]; then
+                REMOTE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+            else
+                REMOTE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz"
+            fi
+            echo "➡️ --force-build requested; preferring source archive: $REMOTE_URL"
         else
-            read -r -p "Enter tarball/zip or binary URL (default: https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz): " REMOTE_URL
-            REMOTE_URL=${REMOTE_URL:-https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz}
+            if auto_url=$(detect_release_asset) && [[ -n "$auto_url" ]]; then
+                REMOTE_URL="$auto_url"
+                echo "➡️ Auto-detected release asset: $REMOTE_URL"
+            else
+                read -r -p "Enter tarball/zip or binary URL (default: https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz): " REMOTE_URL
+                REMOTE_URL=${REMOTE_URL:-https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz}
+            fi
         fi
     fi
     echo "➡️ Downloading $REMOTE_URL"
