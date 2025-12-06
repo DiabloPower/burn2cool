@@ -252,6 +252,58 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
         SKIP_EXTRACTION=0
     fi
 
+    # If user explicitly requested a build, but the detected download was a
+    # single ELF binary, attempt to fetch the source archive instead so we
+    # can build from source. Prefer the release tag if it can be inferred,
+    # otherwise fall back to the main branch tarball.
+    if [[ "$FORCE_BUILD" -eq 1 && "$SKIP_EXTRACTION" -eq 1 ]]; then
+        echo "➡️ --force-build requested but downloaded asset is a binary. Fetching source archive instead."
+        # Try to infer release tag from REMOTE_URL if possible
+        rel_tag=""
+        if [[ -n "${REMOTE_URL:-}" && "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
+            rel_tag="${BASH_REMATCH[1]}"
+        fi
+        if [[ -n "${rel_tag}" ]]; then
+            SRC_ARCHIVE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${rel_tag}.tar.gz"
+        else
+            SRC_ARCHIVE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz"
+        fi
+        echo "➡️ Downloading source archive: $SRC_ARCHIVE_URL"
+        if command -v curl &>/dev/null; then
+            if curl -L --fail -o "$TMPDIR/src_archive" "$SRC_ARCHIVE_URL"; then
+                echo "➡️ Source archive downloaded to $TMPDIR/src_archive"
+                SKIP_EXTRACTION=0
+                TMP_ARCHIVE_PATH="$TMPDIR/src_archive"
+                filetype=$(file -b --mime-type "$TMP_ARCHIVE_PATH" || true)
+                # extract the source archive we just downloaded
+                case "$filetype" in
+                    application/x-gzip|application/gzip)
+                        tar -xzf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar (gzip) extraction failed"; }
+                        ;;
+                    application/x-tar)
+                        tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar extraction failed"; }
+                        ;;
+                    application/zip)
+                        unzip -q "$TMP_ARCHIVE_PATH" -d "$TMPDIR" || { echo "❌ unzip failed"; }
+                        ;;
+                    *)
+                        if tar -tf "$TMP_ARCHIVE_PATH" >/dev/null 2>&1; then
+                            tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || true
+                        elif unzip -t "$TMP_ARCHIVE_PATH" >/dev/null 2>&1; then
+                            unzip -q "$TMP_ARCHIVE_PATH" -d "$TMPDIR" || true
+                        else
+                            echo "❌ Unknown source archive format: $filetype"; 
+                        fi
+                        ;;
+                esac
+            else
+                echo "❌ Failed to download source archive ($SRC_ARCHIVE_URL); will fall back to current directory for build."
+            fi
+        else
+            echo "❌ curl not available to fetch source archive; cannot force-build from remote binary."
+        fi
+    fi
+
     # Extract (only if not an ELF/binary)
     if [[ "$SKIP_EXTRACTION" -ne 1 ]]; then
         echo "➡️ Extracting archive to $TMPDIR"
