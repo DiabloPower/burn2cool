@@ -278,7 +278,7 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
                 # extract the source archive we just downloaded
                 case "$filetype" in
                     application/x-gzip|application/gzip)
-                        tar -xzf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar (gzip) extraction failed"; }
+                            tar -xzf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar (gzip) extraction failed"; }
                         ;;
                     application/x-tar)
                         tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar extraction failed"; }
@@ -301,6 +301,18 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
             fi
         else
             echo "❌ curl not available to fetch source archive; cannot force-build from remote binary."
+        fi
+    fi
+
+    # If we extracted a source archive into $TMPDIR above, try to locate the
+    # expected SOURCE_FILE and update BUILD_DIR to point at the extracted source
+    # so subsequent build steps operate on the downloaded sources rather than
+    # the current working directory.
+    if [[ -d "${TMPDIR:-}" ]]; then
+        extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+        if [[ -n "$extracted_dir" ]]; then
+            BUILD_DIR="$extracted_dir"
+            echo "✅ Found source in downloaded archive: $BUILD_DIR"
         fi
     fi
 
