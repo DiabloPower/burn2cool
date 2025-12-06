@@ -408,7 +408,13 @@ fi
 if [[ "$ACTION" == "install" ]]; then
     SKIP_BUILD=true
 else
-    SKIP_BUILD=${SKIP_BUILD:-false}
+    # If --force-build was specified, ensure we do not skip building even
+    # if an ELF/prebuilt binary was detected earlier.
+    if [[ "$FORCE_BUILD" -eq 1 ]]; then
+        SKIP_BUILD=false
+    else
+        SKIP_BUILD=${SKIP_BUILD:-false}
+    fi
 fi
 
 # --- Offer to install build dependencies and build (skipped if prebuilt selected) ---
