@@ -902,6 +902,19 @@ else
     echo "➡️ SKIP_BUILD=true; skipping dependency installation and build steps (using prebuilt binary)."
 fi
 
+# If the user chose to build from source, prefer the freshly-built binary
+# over any previously-downloaded prebuilt artifact. This ensures that when
+# the user selects 'build' we install what we just compiled.
+if [[ "${ACTION:-}" == "build" ]]; then
+    # If compiled into current dir, prefer that
+    if [[ -f "$BINARY_NAME" ]]; then
+        SRC_BIN_PATH="$(pwd)/$BINARY_NAME"
+    else
+        # Try to find the binary under BUILD_DIR first (deeper search)
+        SRC_BIN_PATH=$(find "${BUILD_DIR:-.}" -maxdepth 6 -type f -name "$BINARY_NAME" -print -quit || true)
+    fi
+fi
+
 # Before installing, ensure SRC_BIN_PATH points to an actual file. Some
 # build flows `cd` into a nested dir which can make earlier path resolution
 # incorrect; try a few likely locations to find the built binary.
