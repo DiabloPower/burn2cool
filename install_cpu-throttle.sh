@@ -430,8 +430,12 @@ if [[ "$SKIP_BUILD" != true ]]; then
                 fi
                 if command -v curl >/dev/null 2>&1; then
                     assets_list=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^\"]*\)".*/\1/p' || true)
-                    # prefer source-like archives
-                    src_match=$(echo "$assets_list" | grep -iE '/archive/|\.tar\.gz$|\.zip$' | head -n1 || true)
+                    # Prefer explicit repository archive endpoints or filenames indicating source
+                    src_match=$(echo "$assets_list" | grep -iE '/archive/|source|src' | head -n1 || true)
+                    # If none found, consider generic archives but exclude obvious binary/arch builds
+                    if [[ -z "${src_match:-}" ]]; then
+                        src_match=$(echo "$assets_list" | grep -iE '\.(tar\.gz|zip)$' | grep -viE 'linux|x86|amd64|arm|aarch64|win|windows|x86_64' | head -n1 || true)
+                    fi
                     if [[ -n "$src_match" ]]; then
                         echo "➡️ Found candidate source archive: $src_match"
                         if curl -L --fail -o "$TMPDIR/src_archive" "$src_match"; then
