@@ -852,6 +852,20 @@ if [[ "$SKIP_BUILD" != true ]]; then
 
     if [[ ${BUILD_FALLBACK:-false} == true ]]; then
         echo "➡️ Compiling sources directly"
+        # If the main source file is not present at the top-level of
+        # BUILD_DIR, try to find it recursively (some archives place
+        # sources inside a nested subdirectory). If found, switch to
+        # that directory before compiling.
+        if [[ ! -f "$SOURCE_FILE" ]]; then
+            nested_src=$(find . -type f -name "$SOURCE_FILE" -print -quit || true)
+            if [[ -n "$nested_src" ]]; then
+                echo "➡️ Found $SOURCE_FILE at nested path: $nested_src"
+                nested_dir=$(dirname "$nested_src")
+                echo "➡️ Changing directory to $nested_dir to compile"
+                cd "$nested_dir"
+            fi
+        fi
+
         if [[ -f "$SOURCE_FILE" ]]; then
             # Link ncurses only if TUI is requested or code requires it; safe to add if lib exists
             TUI_LDFLAGS=""
