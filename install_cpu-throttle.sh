@@ -644,6 +644,11 @@ elif [[ -n "${SRC_BIN_PATH:-}" || -n "${PREBUILT_MAIN:-}" ]]; then
         USE_CHOICE=${USE_CHOICE:-I}
         if [[ "$USE_CHOICE" =~ ^[Bb] ]]; then
             ACTION="build"
+            # When the user explicitly chooses to build interactively, enable
+            # FORCE_BUILD so the subsequent download/build logic prefers source
+            # archives and the canonical Makefile flow (same as --force-build).
+            FORCE_BUILD=1
+            echo "➡️ Interactive choice: build selected — enabling FORCE_BUILD behavior to prefer source archives and canonical make flow"
         else
             ACTION="install"
         fi
