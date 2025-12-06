@@ -411,9 +411,66 @@ if [[ "$SKIP_BUILD" != true ]]; then
     PREBUILT_CTL=$(find "$BUILD_DIR" -maxdepth 4 -type f -name "$CTL_BINARY_NAME" -print -quit || true)
     # if found and not a text source file, prefer it
     if [[ -n "$PREBUILT_MAIN" ]]; then
-        echo "✅ Found prebuilt main binary in archive: $PREBUILT_MAIN"
-        SRC_BIN_PATH="$PREBUILT_MAIN"
-        SKIP_BUILD=true
+            echo "✅ Found prebuilt main binary in archive: $PREBUILT_MAIN"
+            SRC_BIN_PATH="$PREBUILT_MAIN"
+            # If the user explicitly requested a build, try to locate a source
+            # archive from the release assets (or tag archive) instead of
+            # accepting the prebuilt archive.
+            if [[ "${FORCE_BUILD:-0}" -eq 1 ]]; then
+                echo "➡️ --force-build requested but archive contains prebuilt binaries. Trying to find a source archive in release assets."
+                # attempt to infer API URL for release assets
+                rel_tag=""
+                if [[ -n "${REMOTE_URL:-}" && "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
+                    rel_tag="${BASH_REMATCH[1]}"
+                fi
+                if [[ -z "${rel_tag:-}" ]]; then
+                    api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/latest"
+                else
+                    api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/tags/${rel_tag}"
+                fi
+                if command -v curl >/dev/null 2>&1; then
+                    assets_list=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^\"]*\)".*/\1/p' || true)
+                    # prefer source-like archives
+                    src_match=$(echo "$assets_list" | grep -iE '/archive/|\.tar\.gz$|\.zip$' | head -n1 || true)
+                    if [[ -n "$src_match" ]]; then
+                        echo "➡️ Found candidate source archive: $src_match"
+                        if curl -L --fail -o "$TMPDIR/src_archive" "$src_match"; then
+                            echo "➡️ Downloaded source archive to $TMPDIR/src_archive"
+                            # try extraction (tar then unzip)
+                            if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
+                                extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                if [[ -n "$extracted_dir" ]]; then
+                                    BUILD_DIR="$extracted_dir"
+                                    echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                    SKIP_BUILD=false
+                                fi
+                            elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
+                                extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                if [[ -n "$extracted_dir" ]]; then
+                                    BUILD_DIR="$extracted_dir"
+                                    echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                    SKIP_BUILD=false
+                                fi
+                            else
+                                echo "➡️ Failed to extract candidate source archive; will fall back to prebuilt if no source found."
+                            fi
+                        else
+                            echo "➡️ Failed to download candidate source archive: $src_match"
+                        fi
+                    else
+                        echo "➡️ No source archive candidate found in release assets for tag ${rel_tag:-latest}."
+                    fi
+                else
+                    echo "➡️ curl not available to query release assets; cannot locate source archive."
+                fi
+                # If after attempting to find a source we still have no BUILD_DIR/source, fall back to prebuilt
+                if [[ -z "${BUILD_DIR:-}" || ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
+                    echo "➡️ No source available; will use prebuilt binary from archive"
+                    SKIP_BUILD=true
+                fi
+            else
+                SKIP_BUILD=true
+            fi
     fi
     if [[ -n "$PREBUILT_CTL" ]]; then
         echo "✅ Found prebuilt control binary in archive: $PREBUILT_CTL"
