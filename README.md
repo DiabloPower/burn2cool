@@ -1,4 +1,4 @@
-# Burn2Cool — CPU Throttle Daemon
+# Burn2Cool — The ROG Tamer CPU Throttle Daemon
 
 A small, efficient Linux daemon that dynamically adjusts CPU maximum frequency based on temperature. It provides runtime control, profile management, an embedded web UI (optional) and an ncurses TUI (optional).
 
@@ -43,6 +43,7 @@ Where to find more
 -------------------
 - Wiki (full docs, examples, installer flags): https://github.com/DiabloPower/burn2cool/wiki
 - Releases (prebuilt binaries): https://github.com/DiabloPower/burn2cool/releases
+- Security: https://github.com/DiabloPower/burn2cool/blob/main/SECURITY.md
 
 Files in this repo
 ------------------
@@ -51,8 +52,6 @@ Files in this repo
 - `cpu_throttle_tui.c` — optional ncurses TUI source
 - `install_cpu-throttle.sh` — installer script (builds/installs and sets up service)
 - `Makefile`, `assets/`, `include/`
-
-If you want, I can now apply a more targeted edit (e.g., shorten sections, add usage examples, or sync the README's CLI snippets with `--help`). Should I commit this README update now?
 
 ---
 
