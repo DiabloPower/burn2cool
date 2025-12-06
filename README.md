@@ -330,27 +330,23 @@ sudo ./cpu_throttle
 
 ---
 
-## 🔧 Command-Line Options
+## ⚙️ Command Line Options
 
-```
-Usage: cpu_throttle [OPTIONS]
+Refer to `cpu_throttle --help` for the canonical, up-to-date list of options. The most commonly used flags are listed in the "Command-Line Options" section above.
+Web / REST API:
+  --web-port [port]     Enable embedded web UI and REST API (default: 8086). Use `--web-port 0` to disable.
 
 Temperature Control:
   --temp-max <temp>     Maximum temperature in °C (default: 95)
-                        Thresholds scale proportionally with this value
 
 Frequency Limits:
-  --safe-max <freq>     Maximum CPU frequency in kHz
-  --safe-min <freq>     Minimum CPU frequency in kHz
+  --safe-max <freq>     Maximum CPU frequency in kHz (optional)
+  --safe-min <freq>     Minimum CPU frequency in kHz (optional)
 
-Logging:
-  --verbose            Show all throttling decisions
-  --quiet              Errors only
-  --silent             No output
-
-Testing:
-  --dry-run            Show actions without applying changes
-  --help               Show this help message
+Runtime / Testing:
+  --dry-run             Simulate frequency setting (no writes)
+  --log <path>          Append log messages to a file
+  --sensor <path>       Specify custom temperature sensor path (default: /sys/class/thermal/thermal_zone0/temp)
 ```
 
 ### Available Commands
