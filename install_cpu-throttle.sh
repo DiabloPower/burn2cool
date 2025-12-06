@@ -389,20 +389,7 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
     else
         echo "✅ Found source in: $BUILD_DIR"
     fi
-    # If user explicitly requested --force-build but we couldn't find source
-    # in the downloaded archive, abort early with guidance instead of
-    # falling back to the current directory (which likely doesn't contain
-    # the project sources).
-    if [[ "${FORCE_BUILD:-0}" -eq 1 ]]; then
-        if [[ ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
-            echo "❌ --force-build requested but no source files were found in the downloaded archives nor in the current directory."
-            echo "Options:"
-            echo "  1) Re-run without --force-build to install prebuilt binaries from the release."
-            echo "  2) Provide a source archive URL with --fetch-url <url> pointing to a repository archive or source tarball."
-            echo "  3) Clone the repository locally and run this installer from the repository root to build from source."
-            exit 1
-        fi
-    fi
+    
 else
     BUILD_DIR="$(pwd)"
 fi
@@ -521,6 +508,17 @@ if [[ "$SKIP_BUILD" != true ]]; then
                 if [[ -z "${BUILD_DIR:-}" || ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
                     echo "➡️ No source available; will use prebuilt binary from archive"
                     SKIP_BUILD=true
+                fi
+                # If the user requested --force-build, and after scanning tag/head
+                # archives and release assets we still don't have source, abort
+                # with guidance (do not silently fall back to prebuilt binaries).
+                if [[ "${FORCE_BUILD:-0}" -eq 1 && "${SKIP_BUILD:-false}" == "true" ]]; then
+                    echo "❌ --force-build requested but no source archive was found in release assets or tag/head endpoints."
+                    echo "Options:"
+                    echo "  1) Re-run without --force-build to install prebuilt binaries from the release."
+                    echo "  2) Provide a source archive URL with --fetch-url <url> pointing to a repository archive or source tarball."
+                    echo "  3) Clone the repository locally and run this installer from the repository root to build from source."
+                    exit 1
                 fi
             else
                 SKIP_BUILD=true
