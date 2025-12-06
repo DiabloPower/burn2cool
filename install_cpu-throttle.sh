@@ -902,6 +902,29 @@ else
     echo "➡️ SKIP_BUILD=true; skipping dependency installation and build steps (using prebuilt binary)."
 fi
 
+# Before installing, ensure SRC_BIN_PATH points to an actual file. Some
+# build flows `cd` into a nested dir which can make earlier path resolution
+# incorrect; try a few likely locations to find the built binary.
+if [[ -n "${SRC_BIN_PATH:-}" && ! -f "$SRC_BIN_PATH" ]]; then
+    echo "⚠️ Expected built binary not found at $SRC_BIN_PATH; attempting to resolve actual path..."
+    # Search current directory first, then TMPDIR (extraction), then BUILD_DIR
+    candidate=$(find . -type f -name "$BINARY_NAME" -print -quit || true)
+    if [[ -z "$candidate" && -n "${TMPDIR:-}" ]]; then
+        candidate=$(find "$TMPDIR" -type f -name "$BINARY_NAME" -print -quit || true)
+    fi
+    if [[ -z "$candidate" && -n "${BUILD_DIR:-}" ]]; then
+        candidate=$(find "$BUILD_DIR" -maxdepth 6 -type f -name "$BINARY_NAME" -print -quit || true)
+    fi
+    if [[ -n "$candidate" ]]; then
+        SRC_BIN_PATH="$(readlink -f "$candidate")"
+        echo "➡️ Resolved built binary: $SRC_BIN_PATH"
+    else
+        echo "❌ Could not locate built binary $BINARY_NAME. pwd=$(pwd) BUILD_DIR=$BUILD_DIR TMPDIR=${TMPDIR:-}" >&2
+        echo "Try re-running with --fetch-url or inspect the extracted archive." >&2
+        exit 1
+    fi
+fi
+
 echo "➡️ Installing binaries to /usr/local/bin (sudo required)"
 
 # Helper: attempt to install a file, stopping service if it blocks (Text file busy)
