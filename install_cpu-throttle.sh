@@ -815,6 +815,13 @@ if [[ "$SKIP_BUILD" != true ]]; then
     fi
 
     # --- Build ---
+    # Ensure BUILD_DIR points to the directory that actually contains
+    # the expected SOURCE_FILE. Some archives extract with an extra
+    # nesting level, so re-scan recursively and use the first match.
+    srcpath=$(find "$BUILD_DIR" -type f -name "$SOURCE_FILE" -print -quit || true)
+    if [[ -n "$srcpath" ]]; then
+        BUILD_DIR=$(dirname "$srcpath")
+    fi
     printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
     if [[ -f Makefile || -f makefile ]]; then
         echo "➡️ Running 'make assets' then 'make' if available"
