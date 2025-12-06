@@ -871,6 +871,25 @@ void handle_http_request(int client_fd, const char *request) {
                             snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"not found\"}");
                             send_http_response(client_fd, "404 Not Found", "application/json", response);
                         }
+                    } else if (strcmp(method, "PUT") == 0) {
+                        /* Update profile (JSON {"content":"..."}) */
+                        const char *body_start = strstr(request, "\r\n\r\n");
+                        if (body_start) {
+                            body_start += 4;
+                            char content[4096] = {0};
+                            if (extract_json_string(body_start, "\"content\"", content, sizeof(content)) == 0) {
+                                if (write_profile_file(prof, content) == 0) {
+                                    snprintf(response, sizeof(response), "{\"ok\":true}");
+                                    send_http_response(client_fd, "200 OK", "application/json", response);
+                                } else {
+                                    snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"write failed\"}");
+                                    send_http_response(client_fd, "500 Internal Server Error", "application/json", response);
+                                }
+                            } else {
+                                snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"invalid json\"}");
+                                send_http_response(client_fd, "400 Bad Request", "application/json", response);
+                            }
+                        }
                     } else {
                         snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"method not allowed\"}");
                         send_http_response(client_fd, "405 Method Not Allowed", "application/json", response);
@@ -905,32 +924,7 @@ void handle_http_request(int client_fd, const char *request) {
             }
         }
     }
-    else if (strncmp(path, "/api/profiles/", 14) == 0 && strcmp(method, "PUT") == 0) {
-        // Update profile (JSON {"content":"..."})
-            const char *pname = path + 14;
-            if (strstr(pname, "..") || strchr(pname, '/')) {
-                snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"invalid profile name\"}");
-                send_http_response(client_fd, "400 Bad Request", "application/json", response);
-                return;
-            }
-        const char *body_start = strstr(request, "\r\n\r\n");
-        if (body_start) {
-            body_start += 4;
-            char content[4096] = {0};
-            if (extract_json_string(body_start, "\"content\"", content, sizeof(content)) == 0) {
-                if (write_profile_file(pname, content) == 0) {
-                    snprintf(response, sizeof(response), "{\"ok\":true}");
-                    send_http_response(client_fd, "200 OK", "application/json", response);
-                } else {
-                    snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"write failed\"}");
-                    send_http_response(client_fd, "500 Internal Server Error", "application/json", response);
-                }
-            } else {
-                snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"invalid json\"}");
-                send_http_response(client_fd, "400 Bad Request", "application/json", response);
-            }
-        }
-    }
+    
     else if (strcmp(path, "/api/command") == 0 && strcmp(method, "POST") == 0) {
         // Accept JSON {"cmd":"..."} and handle a small set of commands locally
         const char *body_start = strstr(request, "\r\n\r\n");
