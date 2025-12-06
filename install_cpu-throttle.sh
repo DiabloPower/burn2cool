@@ -816,7 +816,16 @@ if [[ "$SKIP_BUILD" != true ]]; then
     # Ensure BUILD_DIR points to the directory that actually contains
     # the expected SOURCE_FILE. Some archives extract with an extra
     # nesting level, so re-scan recursively and use the first match.
-    srcpath=$(find "$BUILD_DIR" -type f -name "$SOURCE_FILE" -print -quit || true)
+    # Prefer scanning the temporary extraction location first (archives
+    # are extracted into $TMPDIR). If that fails, fall back to scanning
+    # the current BUILD_DIR recursively.
+    srcpath=""
+    if [[ -n "${TMPDIR:-}" && -d "$TMPDIR" ]]; then
+        srcpath=$(find "$TMPDIR" -type f -name "$SOURCE_FILE" -print -quit || true)
+    fi
+    if [[ -z "$srcpath" ]]; then
+        srcpath=$(find "$BUILD_DIR" -type f -name "$SOURCE_FILE" -print -quit || true)
+    fi
     if [[ -n "$srcpath" ]]; then
         BUILD_DIR=$(dirname "$srcpath")
     fi
