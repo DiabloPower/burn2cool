@@ -15,3 +15,49 @@ pre{ background:#f6f6f6; padding:8px; border:1px solid #ddd }
   .card{ padding:12px }
   input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0 }
 }
+
+/* Profiles select styling */
+.profiles-select {
+  margin-left:8px;
+  min-width:200px;
+  padding:8px 10px;
+  border-radius:6px;
+  background: #333;
+  color: #fff;
+  border: 1px solid #555;
+  font-size: 0.95em;
+  line-height: 1.2;
+  -webkit-appearance: none; /* remove native arrow on some browsers */
+  appearance: none;
+  box-shadow: none;
+}
+
+
+/* Make the select fit nicely on small screens */
+@media (max-width:700px) {
+  .profiles-select { width:100%; margin-left:0; }
+}
+
+/* Layout helper for label + select on one line */
+.profiles-row { display:flex; align-items:center; gap:12px; }
+
+/* Decorative arrow using inline SVG as background (keeps file small) */
+.profiles-select {
+  /* add small arrow icon (white) */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24'><path fill='%23ffffff' d='M7 10l5 5 5-5z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px 12px;
+  padding-right: 36px; /* room for arrow */
+}
+
+/* Focus / accessibility */
+.profiles-select:focus {
+  outline: none;
+  border-color: #FF8C00;
+  box-shadow: 0 0 0 3px rgba(255,140,0,0.12);
+}
+
+/* Make select visually match input height */
+.profiles-select, input, textarea { height: 40px; }
+.profiles-select { line-height: 1.2; }

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CPU Throttle Monitor</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="styles.css">
   <style>
     *, *:before, *:after { box-sizing: border-box; }
     body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:20px;background:#1a1a1a;color:#fff}
@@ -50,7 +51,12 @@
     </div>
     <div class='card'>
       <h2>Profiles</h2>
-      <div id='profilesList' class='label'>(loading...)</div>
+      <div class='label profiles-row'>
+        <label for='profilesSelect'>Choose profile:</label>
+        <select id='profilesSelect' class='profiles-select'>
+          <option value=''>(loading...)</option>
+        </select>
+      </div>
       <hr/>
       <input id='pname' placeholder='profile filename' />
       <textarea id='pcontent' rows='6' placeholder='profile content (key=value lines)'></textarea>
@@ -74,16 +80,26 @@
       }
       function refreshProfiles(){
         fetch('/api/profiles').then(r=>r.json()).then(list=>{
-          if(!list || !Array.isArray(list)) { document.getElementById('profilesList').textContent='(no profiles)'; return; }
-          const container = document.getElementById('profilesList');
-          container.innerHTML = '';
+          const select = document.getElementById('profilesSelect');
+          const prev = select.value; // remember user's current selection
+          select.innerHTML = '';
+          if(!list || !Array.isArray(list) || list.length===0){
+            const opt = document.createElement('option'); opt.value=''; opt.textContent='(no profiles)'; select.appendChild(opt); return;
+          }
+          const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='(select a profile)'; select.appendChild(placeholder);
           list.forEach(name=>{
-            const el = document.createElement('div'); el.className='label'; el.style.margin='6px 0';
-            el.textContent = name;
-            el.onclick = ()=>{ loadProfileToEditor(name); };
-            container.appendChild(el);
+            const opt = document.createElement('option'); opt.value = name; opt.textContent = name; select.appendChild(opt);
           });
-        }).catch(()=>{ document.getElementById('profilesList').textContent='(failed)'; });
+          // restore previous selection if still present (do not auto-load)
+          if(prev){
+            const found = Array.from(select.options).some(o=>o.value===prev);
+            if(found) select.value = prev;
+          }
+          // only load into editor when user changes the selection
+          select.onchange = function(){ if(this.value) loadProfileToEditor(this.value); };
+        }).catch(()=>{
+          const select = document.getElementById('profilesSelect'); select.innerHTML=''; const opt=document.createElement('option'); opt.value=''; opt.textContent='(failed)'; select.appendChild(opt);
+        });
       }
       function loadProfileToEditor(name){
         fetch('/api/profiles/'+encodeURIComponent(name)).then(r=>{ if(!r.ok) throw 0; return r.text(); }).then(t=>{
