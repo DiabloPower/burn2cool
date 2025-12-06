@@ -222,6 +222,12 @@ Change CPU throttling behavior on-the-fly without restarting the daemon!
 
 ```bash
 # Set maximum frequency (e.g., for gaming)
+
+Usage: `cpu_throttle_ctl <command> [args]`
+
+Common commands:
+
+# Set maximum frequency (e.g., for gaming)
 cpu_throttle_ctl set-safe-max 4000000
 
 # Set minimum frequency
