@@ -429,17 +429,17 @@ if [[ "$SKIP_BUILD" != true ]]; then
                     api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/tags/${rel_tag}"
                 fi
                 if command -v curl >/dev/null 2>&1; then
-                    assets_list=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^\"]*\)".*/\1/p' || true)
-                    # Prefer explicit repository archive endpoints or filenames indicating source
-                    src_match=$(echo "$assets_list" | grep -iE '/archive/|source|src' | head -n1 || true)
-                    # If none found, consider generic archives but exclude obvious binary/arch builds
-                    if [[ -z "${src_match:-}" ]]; then
-                        src_match=$(echo "$assets_list" | grep -iE '\.(tar\.gz|zip)$' | grep -viE 'linux|x86|amd64|arm|aarch64|win|windows|x86_64' | head -n1 || true)
-                    fi
-                    if [[ -n "$src_match" ]]; then
-                        echo "➡️ Found candidate source archive: $src_match"
-                        if curl -L --fail -o "$TMPDIR/src_archive" "$src_match"; then
-                            echo "➡️ Downloaded source archive to $TMPDIR/src_archive"
+                    # First, try tag/head archive endpoints directly (more likely to be actual source archives)
+                    tried_src=0
+                    for ext in "tar.gz" "zip"; do
+                        if [[ -n "${rel_tag}" ]]; then
+                            try_url="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${rel_tag}.${ext}"
+                        else
+                            try_url="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.${ext}"
+                        fi
+                        echo "➡️ Attempting tag/head source archive: $try_url"
+                        if curl -L --fail -o "$TMPDIR/src_archive" "$try_url"; then
+                            echo "➡️ Downloaded candidate source archive to $TMPDIR/src_archive"
                             # try extraction (tar then unzip)
                             if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
                                 extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
@@ -447,6 +447,8 @@ if [[ "$SKIP_BUILD" != true ]]; then
                                     BUILD_DIR="$extracted_dir"
                                     echo "✅ Found source in downloaded archive: $BUILD_DIR"
                                     SKIP_BUILD=false
+                                    tried_src=1
+                                    break
                                 fi
                             elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
                                 extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
@@ -454,15 +456,49 @@ if [[ "$SKIP_BUILD" != true ]]; then
                                     BUILD_DIR="$extracted_dir"
                                     echo "✅ Found source in downloaded archive: $BUILD_DIR"
                                     SKIP_BUILD=false
+                                    tried_src=1
+                                    break
+                                fi
+                            fi
+                        fi
+                    done
+                    # If tag/head attempts failed, fall back to scanning release assets
+                    if [[ "$tried_src" -ne 1 ]]; then
+                        assets_list=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^\"]*\)".*/\1/p' || true)
+                        # Prefer explicit repository archive endpoints or filenames indicating source
+                        src_match=$(echo "$assets_list" | grep -iE '/archive/|source|src' | head -n1 || true)
+                        # If none found, consider generic archives but exclude obvious binary/arch builds
+                        if [[ -z "${src_match:-}" ]]; then
+                            src_match=$(echo "$assets_list" | grep -iE '\.(tar\.gz|zip)$' | grep -viE 'linux|x86|amd64|arm|aarch64|win|windows|x86_64' | head -n1 || true)
+                        fi
+                        if [[ -n "$src_match" ]]; then
+                            echo "➡️ Found candidate source archive: $src_match"
+                            if curl -L --fail -o "$TMPDIR/src_archive" "$src_match"; then
+                                echo "➡️ Downloaded source archive to $TMPDIR/src_archive"
+                                # try extraction (tar then unzip)
+                                if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
+                                    extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                    if [[ -n "$extracted_dir" ]]; then
+                                        BUILD_DIR="$extracted_dir"
+                                        echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                        SKIP_BUILD=false
+                                    fi
+                                elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
+                                    extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                    if [[ -n "$extracted_dir" ]]; then
+                                        BUILD_DIR="$extracted_dir"
+                                        echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                        SKIP_BUILD=false
+                                    fi
+                                else
+                                    echo "➡️ Failed to extract candidate source archive; will fall back to prebuilt if no source found."
                                 fi
                             else
-                                echo "➡️ Failed to extract candidate source archive; will fall back to prebuilt if no source found."
+                                echo "➡️ Failed to download candidate source archive: $src_match"
                             fi
                         else
-                            echo "➡️ Failed to download candidate source archive: $src_match"
+                            echo "➡️ No source archive candidate found in release assets for tag ${rel_tag:-latest}."
                         fi
-                    else
-                        echo "➡️ No source archive candidate found in release assets for tag ${rel_tag:-latest}."
                     fi
                 else
                     echo "➡️ curl not available to query release assets; cannot locate source archive."
