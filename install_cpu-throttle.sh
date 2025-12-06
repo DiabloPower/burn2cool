@@ -890,6 +890,14 @@ if [[ "$SKIP_BUILD" != true ]]; then
     printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
     if [[ -f Makefile || -f makefile ]]; then
         echo "➡️ Running 'make assets' then 'make' if available"
+        # Remove any pre-generated include headers from the extracted
+        # archive so 'make assets' regenerates them from the current
+        # assets/ directory. Some release archives ship generated
+        # headers which can prevent regeneration due to timestamps.
+        if [[ -d include ]]; then
+            echo "➡️ Removing pre-generated include headers to force regeneration"
+            rm -f include/*.h || true
+        fi
         if make assets || true; then
             echo "make assets executed (if present)"
         fi
