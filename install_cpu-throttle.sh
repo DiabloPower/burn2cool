@@ -668,6 +668,7 @@ if [[ "$ACTION" == "build" ]]; then
                             if [[ -n "$extracted_dir" ]]; then
                                 BUILD_DIR="$extracted_dir"
                                 echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                cd "$BUILD_DIR"
                                 tried_src=1
                                 break
                             fi
@@ -676,6 +677,7 @@ if [[ "$ACTION" == "build" ]]; then
                             if [[ -n "$extracted_dir" ]]; then
                                 BUILD_DIR="$extracted_dir"
                                 echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                cd "$BUILD_DIR"
                                 tried_src=1
                                 break
                             fi
@@ -701,6 +703,7 @@ if [[ "$ACTION" == "build" ]]; then
                                 if [[ -n "$extracted_dir" ]]; then
                                     BUILD_DIR="$extracted_dir"
                                     echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                    cd "$BUILD_DIR"
                                     tried_src=1
                                 fi
                             elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
