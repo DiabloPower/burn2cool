@@ -849,10 +849,10 @@ if [[ "$SKIP_BUILD" != true ]]; then
     printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
     if [[ -f Makefile || -f makefile ]]; then
         echo "➡️ Running 'make assets' then 'make' if available"
-        if make assets 2>/dev/null || true; then
+        if make assets || true; then
             echo "make assets executed (if present)"
         fi
-        if make -j"$(nproc)" 2>/dev/null; then
+        if make -j"$(nproc)"; then
             echo "✅ make succeeded"
             # If make didn't produce the expected binary, fall back to direct compile
             if ! find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit >/dev/null 2>&1; then
