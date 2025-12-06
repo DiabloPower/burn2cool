@@ -1,10 +1,6 @@
-CPU Throttle daemon — embedded web UI
-===================================
+# Burn2Cool — The ROG Tamer CPU Throttle Daemon
 
-This repository contains `cpu_throttle`, a small Linux daemon that monitors CPU temperature
-and throttles maximum CPU frequency. It embeds a small web UI (HTML/JS/CSS) into the
-daemon binary by converting static assets into C headers so a single executable can serve
-the dashboard.
+A lightweight Linux service that dynamically throttles CPU frequency based on temperature. Originally designed to tame the powerful (and sometimes thermally confused) **ASUS ROG Strix Hero III**, it works on most Linux systems with standard thermal zones and CPUFreq drivers.
 
 Quick install (prebuilt releases)
 ---------------------------------
@@ -87,11 +83,6 @@ Favicon
 -------
 The web UI links to `/favicon.ico`. Place your favicon file at `assets/favicon.ico` and
 run `make assets` to embed it. The server serves `/favicon.ico` with `Content-Type: image/x-icon`.
-# Burn2Cool — The ROG Tamer CPU Throttle Daemon
-
-A lightweight Linux service that dynamically throttles CPU frequency based on temperature. Originally designed to tame the powerful (and sometimes thermally confused) **ASUS ROG Strix Hero III**, it works on most Linux systems with standard thermal zones and CPUFreq drivers.
-
----
 
 ## 🔧 What's Inside
 
