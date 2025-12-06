@@ -389,6 +389,20 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
     else
         echo "✅ Found source in: $BUILD_DIR"
     fi
+    # If user explicitly requested --force-build but we couldn't find source
+    # in the downloaded archive, abort early with guidance instead of
+    # falling back to the current directory (which likely doesn't contain
+    # the project sources).
+    if [[ "${FORCE_BUILD:-0}" -eq 1 ]]; then
+        if [[ ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
+            echo "❌ --force-build requested but no source files were found in the downloaded archives nor in the current directory."
+            echo "Options:"
+            echo "  1) Re-run without --force-build to install prebuilt binaries from the release."
+            echo "  2) Provide a source archive URL with --fetch-url <url> pointing to a repository archive or source tarball."
+            echo "  3) Clone the repository locally and run this installer from the repository root to build from source."
+            exit 1
+        fi
+    fi
 else
     BUILD_DIR="$(pwd)"
 fi
@@ -601,6 +615,114 @@ else
         SKIP_BUILD=false
     else
         SKIP_BUILD=${SKIP_BUILD:-false}
+    fi
+fi
+
+# If the user selected to build but BUILD_DIR does not contain sources,
+# attempt to fetch a source archive automatically (interactive) before
+# trying to compile in the current directory. This mirrors the logic
+# used when --force-build is given but applies when the user chose
+# 'build' interactively after prebuilt binaries were detected.
+if [[ "$ACTION" == "build" ]]; then
+    if [[ ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
+        echo "⚠️ No source files found in $BUILD_DIR."
+        if [[ "$AUTO_YES" -eq 1 ]]; then
+            TRY_DL=Y
+        else
+            read -r -p "Attempt to download a source archive from the release (recommended)? [Y/n]: " TRY_DL
+            TRY_DL=${TRY_DL:-Y}
+        fi
+        if [[ "$TRY_DL" =~ ^[Yy] ]]; then
+            echo "➡️ Trying to locate a source archive for the release..."
+            rel_tag=""
+            if [[ -n "${REMOTE_URL:-}" && "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
+                rel_tag="${BASH_REMATCH[1]}"
+            fi
+            tried_src=0
+            if command -v curl >/dev/null 2>&1; then
+                for ext in "tar.gz" "zip"; do
+                    if [[ -n "${rel_tag}" ]]; then
+                        try_url="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${rel_tag}.${ext}"
+                    else
+                        try_url="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.${ext}"
+                    fi
+                    echo "➡️ Attempting: $try_url"
+                    if curl -L --fail -o "$TMPDIR/src_archive" "$try_url"; then
+                        if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
+                            extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                            if [[ -n "$extracted_dir" ]]; then
+                                BUILD_DIR="$extracted_dir"
+                                echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                tried_src=1
+                                break
+                            fi
+                        elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
+                            extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                            if [[ -n "$extracted_dir" ]]; then
+                                BUILD_DIR="$extracted_dir"
+                                echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                tried_src=1
+                                break
+                            fi
+                        fi
+                    fi
+                done
+                if [[ "$tried_src" -ne 1 ]]; then
+                    if [[ -z "${rel_tag:-}" ]]; then
+                        api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/latest"
+                    else
+                        api_url="https://api.github.com/repos/DiabloPower/burn2cool/releases/tags/${rel_tag}"
+                    fi
+                    assets_list=$(curl -fsSL "$api_url" 2>/dev/null | sed -n 's/.*"browser_download_url": *"\([^\"]*\)".*/\1/p' || true)
+                    src_match=$(echo "$assets_list" | grep -iE '/archive/|source|src' | head -n1 || true)
+                    if [[ -z "${src_match:-}" ]]; then
+                        src_match=$(echo "$assets_list" | grep -iE '\.(tar\.gz|zip)$' | grep -viE 'linux|x86|amd64|arm|aarch64|win|windows|x86_64' | head -n1 || true)
+                    fi
+                    if [[ -n "$src_match" ]]; then
+                        echo "➡️ Found candidate source archive: $src_match"
+                        if curl -L --fail -o "$TMPDIR/src_archive" "$src_match"; then
+                            if tar -tf "$TMPDIR/src_archive" >/dev/null 2>&1 && tar -xf "$TMPDIR/src_archive" -C "$TMPDIR" >/dev/null 2>&1; then
+                                extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                if [[ -n "$extracted_dir" ]]; then
+                                    BUILD_DIR="$extracted_dir"
+                                    echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                    tried_src=1
+                                fi
+                            elif command -v unzip >/dev/null 2>&1 && unzip -q "$TMPDIR/src_archive" -d "$TMPDIR" >/dev/null 2>&1; then
+                                extracted_dir=$(find "$TMPDIR" -maxdepth 3 -type f -name "$SOURCE_FILE" -print0 | xargs -0 -r -n1 dirname | sed -n '1p' || true)
+                                if [[ -n "$extracted_dir" ]]; then
+                                    BUILD_DIR="$extracted_dir"
+                                    echo "✅ Found source in downloaded archive: $BUILD_DIR"
+                                    tried_src=1
+                                fi
+                            else
+                                echo "➡️ Failed to extract candidate source archive"
+                            fi
+                        else
+                            echo "➡️ Failed to download candidate source archive: $src_match"
+                        fi
+                    else
+                        echo "➡️ No source archive candidates found in release assets."
+                    fi
+                fi
+            else
+                echo "➡️ curl not available; cannot attempt remote source download."
+            fi
+            if [[ ! -f "$BUILD_DIR/$SOURCE_FILE" ]]; then
+                if [[ "$AUTO_YES" -eq 1 ]]; then
+                    echo "❌ No source found; aborting (non-interactive)."
+                    exit 1
+                else
+                    read -r -p "No source found. Continue and attempt build in $BUILD_DIR anyway? [y/N]: " CONTINUE_BLDR
+                    CONTINUE_BLDR=${CONTINUE_BLDR:-N}
+                    if [[ ! "$CONTINUE_BLDR" =~ ^[Yy] ]]; then
+                        echo "Aborting install. Consider running with --fetch-url or cloning the repo locally to build from source."; exit 1
+                    fi
+                fi
+            fi
+        else
+            echo "Aborting: user declined to attempt remote source download. You can re-run with --fetch-url or clone repo locally."; exit 1
+        fi
     fi
 fi
 
