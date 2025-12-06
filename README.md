@@ -355,11 +355,13 @@ Runtime / Testing:
   --sensor <path>       Specify custom temperature sensor path (default: /sys/class/thermal/thermal_zone0/temp)
 ```
 
-### Available Commands
+### Control utility commands (cpu_throttle_ctl)
+
+The following commands are provided by the control utility `cpu_throttle_ctl` (not as direct daemon flags). Use `cpu_throttle_ctl <command> [args]` to invoke them — the utility talks to the running daemon over the Unix socket.
 
 **Frequency Control:**
 - `set-safe-max <freq>` — Set maximum frequency in kHz
-- `set-safe-min <freq>` — Set minimum frequency in kHz  
+- `set-safe-min <freq>` — Set minimum frequency in kHz
 - `set-temp-max <temp>` — Set maximum temperature in °C (50-110)
 
 **Status:**
@@ -371,7 +373,7 @@ Runtime / Testing:
 - `list-profiles` — Show all saved profiles
 - `delete-profile <name>` — Delete a profile
 
-**Daemon:**
+**Daemon control:**
 - `quit` — Gracefully shutdown the daemon
 
 ---
