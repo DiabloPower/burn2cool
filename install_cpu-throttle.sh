@@ -185,8 +185,9 @@ fi
 if [[ "$AUTO_YES" -eq 1 ]]; then
     FETCH_ANS=Y
 else
-    read -r -p "Fetch source files from remote server? [y/N]: " FETCH_ANS
-    FETCH_ANS=${FETCH_ANS:-N}
+    # Default to Yes per user preference (press Enter = Yes)
+    read -r -p "Fetch source files from remote server? [Y/n]: " FETCH_ANS
+    FETCH_ANS=${FETCH_ANS:-Y}
 fi
 if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
     if [[ -n "$FETCH_URL_OVERRIDE" ]]; then
@@ -209,17 +210,31 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
             if [[ -z "$urls" ]]; then
                 return 1
             fi
-            # Prefer asset names that match PREFERRED_ASSET_NAME
-            local match
-            # Prefer an exact asset name (URL ending with the asset name)
-            match=$(echo "$urls" | grep -iE "/${PREFERRED_ASSET_NAME}$" | head -n1 || true)
-            if [[ -n "$match" ]]; then
-                echo "$match"
+                # Prefer asset names that match PREFERRED_ASSET_NAME
+                local match
+                # If the user requested a forced build, prefer source archives
+                if [[ "${FORCE_BUILD:-0}" -eq 1 ]]; then
+                    match=$(echo "$urls" | grep -iE '\.(tar\.gz|tar\.bz2|tar\.xz|zip)$' | head -n1 || true)
+                    if [[ -n "$match" ]]; then
+                        echo "$match"
+                        return 0
+                    fi
+                    # also prefer repository archive endpoints if present
+                    match=$(echo "$urls" | grep -iE '/archive/' | head -n1 || true)
+                    if [[ -n "$match" ]]; then
+                        echo "$match"
+                        return 0
+                    fi
+                fi
+                # Prefer an exact asset name (URL ending with the asset name)
+                match=$(echo "$urls" | grep -iE "/${PREFERRED_ASSET_NAME}$" | head -n1 || true)
+                if [[ -n "$match" ]]; then
+                    echo "$match"
+                    return 0
+                fi
+                # Otherwise fall back to first asset URL
+                echo "$(echo "$urls" | head -n1)"
                 return 0
-            fi
-            # Otherwise fall back to first asset URL
-            echo "$(echo "$urls" | head -n1)"
-            return 0
         }
 
         auto_url=""
@@ -263,44 +278,52 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
         if [[ -n "${REMOTE_URL:-}" && "$REMOTE_URL" =~ /releases/download/([^/]+)/ ]]; then
             rel_tag="${BASH_REMATCH[1]}"
         fi
-        if [[ -n "${rel_tag}" ]]; then
-            SRC_ARCHIVE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${rel_tag}.tar.gz"
-        else
-            SRC_ARCHIVE_URL="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.tar.gz"
-        fi
-        echo "➡️ Downloading source archive: $SRC_ARCHIVE_URL"
-        if command -v curl &>/dev/null; then
-            if curl -L --fail -o "$TMPDIR/src_archive" "$SRC_ARCHIVE_URL"; then
-                echo "➡️ Source archive downloaded to $TMPDIR/src_archive"
-                SKIP_EXTRACTION=0
-                TMP_ARCHIVE_PATH="$TMPDIR/src_archive"
-                filetype=$(file -b --mime-type "$TMP_ARCHIVE_PATH" || true)
-                # extract the source archive we just downloaded
-                case "$filetype" in
-                    application/x-gzip|application/gzip)
-                            tar -xzf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar (gzip) extraction failed"; }
-                        ;;
-                    application/x-tar)
-                        tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || { echo "❌ tar extraction failed"; }
-                        ;;
-                    application/zip)
-                        unzip -q "$TMP_ARCHIVE_PATH" -d "$TMPDIR" || { echo "❌ unzip failed"; }
-                        ;;
-                    *)
-                        if tar -tf "$TMP_ARCHIVE_PATH" >/dev/null 2>&1; then
-                            tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" || true
-                        elif unzip -t "$TMP_ARCHIVE_PATH" >/dev/null 2>&1; then
-                            unzip -q "$TMP_ARCHIVE_PATH" -d "$TMPDIR" || true
-                        else
-                            echo "❌ Unknown source archive format: $filetype"; 
-                        fi
-                        ;;
-                esac
+        # Try tag-based archives, prefer common archive formats (.tar.gz then .zip)
+        tried_any=0
+        for ext in "tar.gz" "zip"; do
+            if [[ -n "${rel_tag}" ]]; then
+                try_url="https://github.com/DiabloPower/burn2cool/archive/refs/tags/${rel_tag}.${ext}"
             else
-                echo "❌ Failed to download source archive ($SRC_ARCHIVE_URL); will fall back to current directory for build."
+                try_url="https://github.com/DiabloPower/burn2cool/archive/refs/heads/main.${ext}"
             fi
-        else
-            echo "❌ curl not available to fetch source archive; cannot force-build from remote binary."
+            echo "➡️ Attempting to download source archive: $try_url"
+            if command -v curl &>/dev/null; then
+                if curl -L --fail -o "$TMPDIR/src_archive" "$try_url"; then
+                    echo "➡️ Source archive downloaded to $TMPDIR/src_archive"
+                    SKIP_EXTRACTION=0
+                    TMP_ARCHIVE_PATH="$TMPDIR/src_archive"
+                    filetype=$(file -b --mime-type "$TMP_ARCHIVE_PATH" || true)
+                    # Try extraction: prefer tar, fallback to unzip
+                    extraction_ok=0
+                    if tar -tf "$TMP_ARCHIVE_PATH" >/dev/null 2>&1; then
+                        if tar -xf "$TMP_ARCHIVE_PATH" -C "$TMPDIR" >/dev/null 2>&1; then
+                            extraction_ok=1
+                        else
+                            echo "❌ tar extraction failed for $TMP_ARCHIVE_PATH"
+                        fi
+                    fi
+                    if [[ $extraction_ok -ne 1 ]]; then
+                        if command -v unzip >/dev/null 2>&1 && unzip -q "$TMP_ARCHIVE_PATH" -d "$TMPDIR" >/dev/null 2>&1; then
+                            extraction_ok=1
+                        fi
+                    fi
+                    if [[ $extraction_ok -eq 1 ]]; then
+                        tried_any=1
+                        break
+                    else
+                        echo "➡️ Extraction failed for $try_url; trying next candidate if available"
+                        # continue to next ext
+                    fi
+                else
+                    echo "➡️ Download failed for $try_url; trying next candidate"
+                fi
+            else
+                echo "❌ curl not available to fetch source archive; cannot force-build from remote binary."
+                break
+            fi
+        done
+        if [[ $tried_any -ne 1 ]]; then
+            echo "❌ Could not download & extract a suitable source archive for tag '${rel_tag:-main}'. Will fall back to current directory for build."
         fi
     fi
 
