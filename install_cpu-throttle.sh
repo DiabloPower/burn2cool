@@ -16,6 +16,7 @@ FORCE_BINARIES=0
 RELEASE_TAG=""                # empty = use latest
 PREFERRED_ASSET_NAME="cpu_throttle"  # asset name to look for in release assets
 
+ORIG_ARGC=$#
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes|--non-interactive)
@@ -159,12 +160,20 @@ has_ncurses() {
     return 1
 }
 
-echo "🔍 Detecting package manager..."
-PKG_MANAGER=$(detect_package_manager)
-if [[ -z "$PKG_MANAGER" ]]; then
-    echo "⚠️  No supported package manager detected. You can still build from source, but dependency installation won't be automatic."
-else
-    echo "✅ Detected package manager: $PKG_MANAGER"
+# Show welcome banner when invoked with no args (interactive default)
+if [[ "$ORIG_ARGC" -eq 0 && "${QUIET:-0}" -ne 1 ]]; then
+    cat <<'BANNER'
+============================================================
+cpu_throttle installer - interactive
+
+No options passed. You will be asked whether to fetch prebuilt
+binaries or build from source. Use -y to run non-interactively.
+
+Examples:
+    ./install_cpu-throttle.sh           # interactive
+    ./install_cpu-throttle.sh -y        # non-interactive defaults
+============================================================
+BANNER
 fi
 
 # --- Optionally fetch files from server ---
@@ -197,7 +206,8 @@ if [[ "$FETCH_ANS" =~ ^[Yy] ]]; then
             fi
             # Prefer asset names that match PREFERRED_ASSET_NAME
             local match
-            match=$(echo "$urls" | grep -i "/${PREFERRED_ASSET_NAME}\(\.|$\)" | head -n1 || true)
+            # Prefer an exact asset name (URL ending with the asset name)
+            match=$(echo "$urls" | grep -iE "/${PREFERRED_ASSET_NAME}$" | head -n1 || true)
             if [[ -n "$match" ]]; then
                 echo "$match"
                 return 0
@@ -381,137 +391,144 @@ else
     SKIP_BUILD=${SKIP_BUILD:-false}
 fi
 
-# --- Offer to install build dependencies ---
-printf "\n🔧 Build dependencies required: gcc, make, pkg-config, python3, curl, git\n"
-if [[ "$ENABLE_TUI" -eq 1 ]]; then
-    echo " (TUI selected: will also require libncurses-dev/ncurses-devel)"
-else
-    echo
-fi
-
-if [[ "$AUTO_YES" -eq 1 ]]; then
-    INSTALL_DEPS=Y
-else
-    if [[ -n "$PKG_MANAGER" ]]; then
-        read -r -p "Install missing dependencies now? (will use $PKG_MANAGER) [Y/n]: " INSTALL_DEPS
-        INSTALL_DEPS=${INSTALL_DEPS:-Y}
+# --- Offer to install build dependencies and build (skipped if prebuilt selected) ---
+if [[ "$SKIP_BUILD" != true ]]; then
+    printf "\n🔧 Build dependencies required: gcc, make, pkg-config, python3, curl, git\n"
+    if [[ "$ENABLE_TUI" -eq 1 ]]; then
+        echo " (TUI selected: will also require libncurses-dev/ncurses-devel)"
     else
-        read -r -p "Proceed to build without installing dependencies? (you may need to install them manually) [y/N]: " INSTALL_DEPS
-        INSTALL_DEPS=${INSTALL_DEPS:-N}
+        echo
     fi
-fi
 
-if [[ "$INSTALL_DEPS" =~ ^[Yy] ]]; then
-    case "$PKG_MANAGER" in
-        apt-get)
-            desired=(build-essential pkg-config python3 python3-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(libncurses-dev)
-            fi
-            ;;
-        dnf)
-            sudo dnf groupinstall -y "Development Tools" || true
-            desired=(pkgconf-pkg-config python3 python3-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(ncurses-devel)
-            fi
-            ;;
-        yum)
-            sudo yum groupinstall -y "Development Tools" || true
-            desired=(pkgconf-pkg-config python3 python3-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(ncurses-devel)
-            fi
-            ;;
-        pacman)
-            desired=(base-devel pkgconf python python-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(ncurses)
-            fi
-            ;;
-        zypper)
-            sudo zypper install -y -t pattern devel_C_C++ || true
-            desired=(pkg-config python3 python3-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(ncurses-devel)
-            fi
-            ;;
-        apk)
-            desired=(build-base pkgconfig python3 py3-pip curl git)
-            if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
-                desired+=(ncurses-dev)
-            fi
-            ;;
-        *)
-            echo "Skipping automated dependency installation." ;;
-    esac
+    # detect package manager now (so this message doesn't appear before the welcome banner)
+    PKG_MANAGER=$(detect_package_manager)
 
-    # Install only missing packages
-    if [[ ${#desired[@]} -gt 0 ]]; then
-        missing=()
-        for p in "${desired[@]}"; do
-            if ! has_package "$p"; then
-                missing+=("$p")
-            else
-                echo "ℹ️ Package '$p' already installed; skipping."
-            fi
-        done
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "➡️ Installing missing packages: ${missing[*]}"
-            install_package "${missing[@]}"
+    if [[ "$AUTO_YES" -eq 1 ]]; then
+        INSTALL_DEPS=Y
+    else
+        if [[ -n "$PKG_MANAGER" ]]; then
+            read -r -p "Install missing dependencies now? (will use $PKG_MANAGER) [Y/n]: " INSTALL_DEPS
+            INSTALL_DEPS=${INSTALL_DEPS:-Y}
         else
-            echo "✅ All required packages are already installed."
+            read -r -p "Proceed to build without installing dependencies? (you may need to install them manually) [y/N]: " INSTALL_DEPS
+            INSTALL_DEPS=${INSTALL_DEPS:-N}
         fi
     fi
-fi
 
-# --- Build ---
-printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
-if [[ -f Makefile || -f makefile ]]; then
-    echo "➡️ Running 'make assets' then 'make' if available"
-    if make assets 2>/dev/null || true; then
-        echo "make assets executed (if present)"
+    if [[ "$INSTALL_DEPS" =~ ^[Yy] ]]; then
+        case "$PKG_MANAGER" in
+            apt-get)
+                desired=(build-essential pkg-config python3 python3-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(libncurses-dev)
+                fi
+                ;;
+            dnf)
+                sudo dnf groupinstall -y "Development Tools" || true
+                desired=(pkgconf-pkg-config python3 python3-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(ncurses-devel)
+                fi
+                ;;
+            yum)
+                sudo yum groupinstall -y "Development Tools" || true
+                desired=(pkgconf-pkg-config python3 python3-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(ncurses-devel)
+                fi
+                ;;
+            pacman)
+                desired=(base-devel pkgconf python python-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(ncurses)
+                fi
+                ;;
+            zypper)
+                sudo zypper install -y -t pattern devel_C_C++ || true
+                desired=(pkg-config python3 python3-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(ncurses-devel)
+                fi
+                ;;
+            apk)
+                desired=(build-base pkgconfig python3 py3-pip curl git)
+                if [[ "$ENABLE_TUI" -eq 1 ]] && ! has_ncurses; then
+                    desired+=(ncurses-dev)
+                fi
+                ;;
+            *)
+                echo "Skipping automated dependency installation." ;;
+        esac
+
+        # Install only missing packages
+        if [[ ${#desired[@]} -gt 0 ]]; then
+            missing=()
+            for p in "${desired[@]}"; do
+                if ! has_package "$p"; then
+                    missing+=("$p")
+                else
+                    echo "ℹ️ Package '$p' already installed; skipping."
+                fi
+            done
+            if [[ ${#missing[@]} -gt 0 ]]; then
+                echo "➡️ Installing missing packages: ${missing[*]}"
+                install_package "${missing[@]}"
+            else
+                echo "✅ All required packages are already installed."
+            fi
+        fi
     fi
-    if make -j"$(nproc)" 2>/dev/null; then
-        echo "✅ make succeeded"
-        # If make didn't produce the expected binary, fall back to direct compile
-        if ! find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit >/dev/null 2>&1; then
-            echo "⚠️ 'make' did not produce $BINARY_NAME; falling back to direct compile"
+
+    # --- Build ---
+    printf "\n🛠️ Building project in: %s\n" "$BUILD_DIR"
+    if [[ -f Makefile || -f makefile ]]; then
+        echo "➡️ Running 'make assets' then 'make' if available"
+        if make assets 2>/dev/null || true; then
+            echo "make assets executed (if present)"
+        fi
+        if make -j"$(nproc)" 2>/dev/null; then
+            echo "✅ make succeeded"
+            # If make didn't produce the expected binary, fall back to direct compile
+            if ! find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit >/dev/null 2>&1; then
+                echo "⚠️ 'make' did not produce $BINARY_NAME; falling back to direct compile"
+                BUILD_FALLBACK=true
+            fi
+        else
+            echo "⚠️ make failed or not available; falling back to direct compile"
             BUILD_FALLBACK=true
         fi
     else
-        echo "⚠️ make failed or not available; falling back to direct compile"
         BUILD_FALLBACK=true
     fi
-else
-    BUILD_FALLBACK=true
-fi
 
-if [[ ${BUILD_FALLBACK:-false} == true ]]; then
-    echo "➡️ Compiling sources directly"
-    if [[ -f "$SOURCE_FILE" ]]; then
-        # Link ncurses only if TUI is requested or code requires it; safe to add if lib exists
-        TUI_LDFLAGS=""
-        if [[ "$ENABLE_TUI" -eq 1 ]]; then
-            TUI_LDFLAGS="-lncurses"
+    if [[ ${BUILD_FALLBACK:-false} == true ]]; then
+        echo "➡️ Compiling sources directly"
+        if [[ -f "$SOURCE_FILE" ]]; then
+            # Link ncurses only if TUI is requested or code requires it; safe to add if lib exists
+            TUI_LDFLAGS=""
+            if [[ "$ENABLE_TUI" -eq 1 ]]; then
+                TUI_LDFLAGS="-lncurses"
+            fi
+            gcc -O2 -Wall -Wextra -std=c11 -pthread -o "$BINARY_NAME" "$SOURCE_FILE" $TUI_LDFLAGS || { echo "❌ Failed to compile $SOURCE_FILE"; exit 1; }
+        else
+            echo "❌ $SOURCE_FILE not found in $BUILD_DIR"; exit 1
         fi
-        gcc -O2 -Wall -Wextra -std=c11 -pthread -o "$BINARY_NAME" "$SOURCE_FILE" $TUI_LDFLAGS || { echo "❌ Failed to compile $SOURCE_FILE"; exit 1; }
-    else
-        echo "❌ $SOURCE_FILE not found in $BUILD_DIR"; exit 1
+        if [[ -f "$CTL_SOURCE_FILE" ]]; then
+            gcc -O2 -Wall -Wextra -std=c11 -o "$CTL_BINARY_NAME" "$CTL_SOURCE_FILE" || echo "⚠️ Control utility not compiled (source missing)"
+        fi
     fi
-    if [[ -f "$CTL_SOURCE_FILE" ]]; then
-        gcc -O2 -Wall -Wextra -std=c11 -o "$CTL_BINARY_NAME" "$CTL_SOURCE_FILE" || echo "⚠️ Control utility not compiled (source missing)"
-    fi
-fi
 
-# If make produced binaries in subdir (e.g., bin/), try to locate them
-if [[ -f "$BINARY_NAME" ]]; then
-    SRC_BIN_PATH="$BUILD_DIR/$BINARY_NAME"
+    # If make produced binaries in subdir (e.g., bin/), try to locate them
+    if [[ -f "$BINARY_NAME" ]]; then
+        SRC_BIN_PATH="$BUILD_DIR/$BINARY_NAME"
+    else
+        SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit || true)
+    fi
+    if [[ -z "$SRC_BIN_PATH" ]]; then
+        echo "❌ Could not find built binary $BINARY_NAME"; exit 1
+    fi
 else
-    SRC_BIN_PATH=$(find "$BUILD_DIR" -maxdepth 2 -type f -name "$BINARY_NAME" -print -quit || true)
-fi
-if [[ -z "$SRC_BIN_PATH" ]]; then
-    echo "❌ Could not find built binary $BINARY_NAME"; exit 1
+    echo "➡️ SKIP_BUILD=true; skipping dependency installation and build steps (using prebuilt binary)."
 fi
 
 echo "➡️ Installing binaries to /usr/local/bin (sudo required)"
