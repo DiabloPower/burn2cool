@@ -25,7 +25,7 @@
 #define DEFAULT_PORT 8086
 #define DEFAULT_HOST "http://localhost"
 /* update when releasing new versions */
-#define APP_VERSION "v0.3.0"
+#define APP_VERSION "v0.4.0"
 
 typedef struct {
     char *data;
@@ -501,7 +501,7 @@ static void on_show_version(GtkMenuItem *item, gpointer user_data) {
 
     if (!about_widget) {
         about_widget = gtk_about_dialog_new();
-        gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(about_widget), "cpu-throttle GUI");
+        gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(about_widget), "Burn2Cool GUI");
         gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(about_widget), APP_VERSION);
         const gchar *authors[] = {"DiabloPower", NULL};
         gtk_about_dialog_set_authors(GTK_ABOUT_DIALOG(about_widget), authors);
