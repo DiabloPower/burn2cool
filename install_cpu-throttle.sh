@@ -807,6 +807,7 @@ download_source_and_build() {
         install -m 0755 "$src_dir/gui_tray/burn2cool_tray" "$WORK_DIR/burn2cool_tray"
         mkdir -p "$WORK_DIR/staging"
         cp -r "$src_dir/gui_tray/assets" "$src_dir/gui_tray/i18n" "$WORK_DIR/staging/" 2>/dev/null || true
+        cp -r "$src_dir/assets" "$WORK_DIR/staging/" 2>/dev/null || true
         GUI_BUILT=1
       else
         warn "GUI build failed - binary not found"
@@ -1218,11 +1219,16 @@ Type=Application
 Categories=System;Monitor;
 EOF
     log "Installed desktop file: /usr/share/applications/burn2cool-tray.desktop"
-    # Install icon
-    sudo mkdir -p /usr/share/icons/hicolor/48x48/apps
-    sudo cp "$WORK_DIR/staging/assets/icon.png" /usr/share/icons/hicolor/48x48/apps/burn2cool.png
+    # Install icons in multiple sizes for better scalability
+    local icon_sizes="16 22 24 32 48 64 96 128 256 512"
+    for size in $icon_sizes; do
+      if [ -f "$WORK_DIR/staging/assets/icon-${size}.png" ]; then
+        sudo mkdir -p "/usr/share/icons/hicolor/${size}x${size}/apps"
+        sudo cp "$WORK_DIR/staging/assets/icon-${size}.png" "/usr/share/icons/hicolor/${size}x${size}/apps/burn2cool.png"
+      fi
+    done
     sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
-    log "Installed application icon"
+    log "Installed application icons in multiple sizes"
     # Ask about autostart
     if prompt_yes_no "Enable GUI autostart for the current user?" "n"; then
       mkdir -p ~/.config/autostart
@@ -1246,8 +1252,11 @@ sudo rm -rf /usr/local/share/burn2cool_tray
 # Remove desktop file
 sudo rm -f /usr/share/applications/burn2cool-tray.desktop
 
-# Remove icon
-sudo rm -f /usr/share/icons/hicolor/48x48/apps/burn2cool.png
+# Remove icons in multiple sizes
+local icon_sizes="16 22 24 32 48 64 96 128 256 512"
+for size in $icon_sizes; do
+  sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/burn2cool.png"
+done
 sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 
 # Remove autostart if exists
