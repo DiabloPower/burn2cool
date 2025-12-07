@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# If executed remotely (via curl), download and execute locally to avoid issues
+if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH_SOURCE[0]}" == http* ]]; then
+    echo "Remote execution detected - downloading script locally for proper execution..."
+    
+    # Create temp directory
+    TEMP_DIR=$(mktemp -d)
+    SCRIPT_PATH="$TEMP_DIR/install_cpu-throttle.sh"
+    
+    # Download the script
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh" -o "$SCRIPT_PATH"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh" -O "$SCRIPT_PATH"
+    else
+        echo "ERROR: Neither curl nor wget available for downloading script"
+        exit 1
+    fi
+    
+    # Make executable and run locally
+    chmod +x "$SCRIPT_PATH"
+    exec "$SCRIPT_PATH" "$@"
+    exit 0
+fi
+
 # Ignore SIGTERM to prevent remote termination
 trap 'log "Received SIGTERM - ignoring to prevent premature termination"' TERM
 
@@ -1046,13 +1070,6 @@ unpack_and_install_gui_zip || true
 # =========================
 
 stop_daemon() {
-  # Skip daemon stopping when script is executed remotely (e.g., via curl)
-  # This prevents the installer from terminating itself during remote execution
-  if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
-    log "Remote script execution detected - skipping daemon stop to prevent installer termination"
-    return
-  fi
-
   # Only stop if daemon is being installed
   if [ "${WANT_DAEMON:-0}" -eq 0 ]; then return; fi
 
