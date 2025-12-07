@@ -21,6 +21,9 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
     
     # Make executable and run locally
     chmod +x "$SCRIPT_PATH"
+    # Mark that this is a temp execution for cleanup
+    export BURN2COOL_TEMP_EXEC=1
+    export BURN2COOL_TEMP_DIR="$TEMP_DIR"
     exec "$SCRIPT_PATH" "$@"
     exit 0
 fi
@@ -1459,3 +1462,9 @@ fi
 log "==============================================================="
 
 log "Script finished successfully"
+
+# Cleanup temp directory if this was a remote execution
+if [ "${BURN2COOL_TEMP_EXEC:-0}" -eq 1 ] && [ -n "${BURN2COOL_TEMP_DIR:-}" ]; then
+    log "Cleaning up temporary files..."
+    rm -rf "$BURN2COOL_TEMP_DIR" || warn "Failed to cleanup temp directory: $BURN2COOL_TEMP_DIR"
+fi
