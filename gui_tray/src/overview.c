@@ -11,6 +11,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #define HISTORY_LEN 300
 #define POLL_INTERVAL_MS 2000
@@ -21,6 +24,7 @@ typedef struct {
 } MemoryChunk;
 
 static int http_port = 8086;
+static int use_http_first = 0;
 
 static GtkWidget *overview_window = NULL;
 static GtkWidget *drawing_area = NULL;
@@ -67,21 +71,93 @@ static char *http_build_url(const char *path) {
     return url;
 }
 
+static char *socket_get(const char *cmd) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) return NULL;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/cpu_throttle.sock", sizeof(addr.sun_path) - 1);
+
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock_fd);
+        return NULL;
+    }
+
+    if (send(sock_fd, cmd, strlen(cmd), 0) < 0) {
+        close(sock_fd);
+        return NULL;
+    }
+
+    char *response = malloc(2048);
+    if (!response) {
+        close(sock_fd);
+        return NULL;
+    }
+    ssize_t n = recv(sock_fd, response, 2047, 0);
+    if (n > 0) {
+        response[n] = '\0';
+    } else {
+        free(response);
+        response = NULL;
+    }
+
+    close(sock_fd);
+    return response;
+}
+
 static char *http_get(const char *path) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
-    MemoryChunk chunk = { .data = malloc(1), .size = 0 };
-    char *url = http_build_url(path);
-    if (!url) { free(chunk.data); curl_easy_cleanup(curl); return NULL; }
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
-    CURLcode res = curl_easy_perform(curl);
-    free(url);
-    curl_easy_cleanup(curl);
-    if (res != CURLE_OK) { free(chunk.data); return NULL; }
-    return chunk.data;
+    if (use_http_first) {
+        // Try HTTP first
+        CURL *curl = curl_easy_init();
+        if (curl) {
+            MemoryChunk chunk = { .data = malloc(1), .size = 0 };
+            char *url = http_build_url(path);
+            if (!url) { free(chunk.data); curl_easy_cleanup(curl); return NULL; }
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
+            CURLcode res = curl_easy_perform(curl);
+            free(url);
+            curl_easy_cleanup(curl);
+            if (res == CURLE_OK) {
+                return chunk.data;
+            }
+            free(chunk.data);
+        }
+    }
+
+    // Try socket
+    char *result = NULL;
+    if (strcmp(path, "/api/status") == 0) {
+        result = socket_get("status json");
+    }
+    if (result) return result;
+
+    if (!use_http_first) {
+        // Fallback to HTTP
+        CURL *curl = curl_easy_init();
+        if (!curl) return NULL;
+        MemoryChunk chunk = { .data = malloc(1), .size = 0 };
+        char *url = http_build_url(path);
+        if (!url) { free(chunk.data); curl_easy_cleanup(curl); return NULL; }
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
+        CURLcode res = curl_easy_perform(curl);
+        free(url);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK) {
+            free(chunk.data);
+            return NULL;
+        }
+        return chunk.data;
+    }
+
+    return NULL;
 }
 
 /* --- data handling --- */
@@ -360,6 +436,7 @@ static gboolean poll_cb(gpointer user_data) {
 /* Public API */
 void overview_set_port(int port) {
     http_port = port;
+    use_http_first = 1; // since port is set, prefer HTTP
 }
 
 void overview_show(GtkWindow *parent) {

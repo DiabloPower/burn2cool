@@ -33,6 +33,7 @@ typedef struct {
 } MemoryChunk;
 
 static int http_port = DEFAULT_PORT;
+static int use_http_first = 0; // set if --port was specified
 static AppIndicator *indicator = NULL;
 static GtkWidget *profiles_menu = NULL;
 static GtkWidget *status_item = NULL;
@@ -57,28 +58,6 @@ static void on_show_overview(GtkMenuItem *item, gpointer user_data) {
     (void)item; (void)user_data;
     overview_set_port(http_port);
     overview_show(NULL);
-}
-
-// Read config file to check if web_port is set
-static int read_config_web_port() {
-    FILE *fp = fopen("/etc/cpu_throttle.conf", "r");
-    if (!fp) return 0; // no config, use socket
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '#' || *p == '\n' || *p == '\0') continue;
-        char key[64], value[64];
-        if (sscanf(p, "%63[^=]=%63s", key, value) == 2) {
-            if (strcmp(key, "web_port") == 0) {
-                int port = atoi(value);
-                fclose(fp);
-                return port > 0 ? port : 0;
-            }
-        }
-    }
-    fclose(fp);
-    return 0;
 }
 
 // Read a local file into a malloc'd buffer (caller must free)
@@ -393,19 +372,8 @@ static char *socket_get(const char *cmd) {
 }
 
 static char *http_get(const char *path) {
-    static int config_checked = 0;
-    static int use_http_first = 0;
-    if (!config_checked) {
-        int port = read_config_web_port();
-        if (port > 0) {
-            http_port = port;
-            use_http_first = 1;
-        }
-        config_checked = 1;
-    }
-
     if (use_http_first) {
-        // Try HTTP first if web_port is configured
+        // Try HTTP first if --port was specified
         CURL *curl = curl_easy_init();
         if (curl) {
             MemoryChunk chunk = { .data = malloc(1), .size = 0 };
@@ -870,6 +838,7 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             http_port = atoi(argv[++i]);
+            use_http_first = 1;
         } else if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
             strncpy(cli_lang, argv[++i], sizeof(cli_lang)-1);
             cli_lang[sizeof(cli_lang)-1] = '\0';
