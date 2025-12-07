@@ -581,6 +581,10 @@ static void try_set_indicator_icon_once(void) {
     /* Try to install a user-local themed icon so desktop environments that
      * prefer icon names (from the icon theme) can show our icon immediately.
      * The installed path follows the hicolor theme layout for 32x32 apps. */
+    if (g_file_test(about_img, G_FILE_TEST_EXISTS)) {
+        app_indicator_set_icon_full(indicator, about_img, "cpu-throttle");
+        return;
+    }
     if (g_file_test(icon_small, G_FILE_TEST_EXISTS)) {
         /* attempt to install to ~/.local/share/icons/hicolor/32x32/apps/cpu-throttle.png */
         const char *home = getenv("HOME");
@@ -621,14 +625,6 @@ static void try_set_indicator_icon_once(void) {
             }
         }
         app_indicator_set_icon_full(indicator, icon_small, "cpu-throttle");
-        return;
-    }
-    if (g_file_test(icon_small, G_FILE_TEST_EXISTS)) {
-        app_indicator_set_icon_full(indicator, icon_small, "cpu-throttle");
-        return;
-    }
-    if (g_file_test(about_img, G_FILE_TEST_EXISTS)) {
-        app_indicator_set_icon_full(indicator, about_img, "cpu-throttle");
         return;
     }
     char *favpath = write_embedded_favicon();
