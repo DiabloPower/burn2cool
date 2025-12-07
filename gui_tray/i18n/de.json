@@ -1,0 +1,42 @@
+{
+  "menu": {
+    "status_initializing": "Status: Initialisierung...",
+    "language": "Sprache",
+    "profiles_label": "Profile",
+    "overview": "Übersicht",
+    "open_web_ui": "Web-UI öffnen",
+    "quit": "Beenden",
+    "failed_fetch_profiles": "Profile konnten nicht geladen werden",
+    "no_profiles_available": "Keine Profile verfügbar",
+    "version_label": "Version: %s"
+    ,"about": "Info"
+  },
+  "about": {
+    "title": "Info"
+  },
+  "status": {
+    "offline": "Status: Offline",
+    "temperature_na": "Status: Temperatur nicht verfügbar",
+    "frequency_na": "Status: Frequenz nicht verfügbar",
+    "format": "Status: %d°C, %.1f MHz"
+  },
+  "messages": {
+    "loaded_profile_title": "Profil geladen",
+    "loaded_profile_body": "Profil '%s' ist jetzt aktiv.",
+    "load_failed_title": "Laden fehlgeschlagen",
+    "load_failed_body": "Laden von Profil '%s' fehlgeschlagen: %s",
+    "contact_failed_body": "Verbindung zum Daemon zum Laden von Profil '%s' fehlgeschlagen.",
+    "no_response": "Keine Antwort vom Daemon."
+    ,
+    "language_changed_title": "Sprache geändert",
+    "language_changed_body": "Sprache gewechselt zu %s"
+  ,
+    "version_title": "Version",
+    "version_body": "%s (Daemon Port %d)"
+  }
+  ,
+  "meta": {
+    "code": "de",
+    "name": "Deutsch"
+  }
+}

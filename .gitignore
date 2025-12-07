@@ -19,6 +19,7 @@ WIKI_DRAFT
 cpu_throttle
 cpu_throttle_ctl
 cpu_throttle_tui
+burn2cool_tray
 
 # Object files, coverage, and temporary build files
 *.o
