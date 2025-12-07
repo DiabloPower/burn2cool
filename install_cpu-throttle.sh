@@ -1360,7 +1360,6 @@ WantedBy=multi-user.target
   # Always restart the service after installation
   sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
 }
-}
 
 if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   create_service
