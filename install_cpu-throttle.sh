@@ -1357,6 +1357,7 @@ WantedBy=multi-user.target
   else
     sudo systemctl enable "$BINARY_NAME" || warn "Failed to enable service"
   fi
+  # Always restart the service after installation
   sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
 }
 }
