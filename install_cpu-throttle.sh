@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Consolidated installer v2 for cpu_throttle
 # - Based on user's draft and existing `install_cpu-throttle.sh`
 # - Preserves provided variable names (including DEAMON_* typos)
@@ -130,16 +132,19 @@ done
 # Greeting
 # =========================
 
-log "==============================================================="
+log "=============================================================================="
 log " Burn2Cool installer for ${BINARY_NAME} (temperature-based CPU governor)"
 log " Repo: https://github.com/${REPO_OWNER}/${REPO_NAME}"
 log " This will:"
-log "  - Download binaries or build from source"
-log "  - Stage in a temp dir for consistent processing"
-log "  - Stop any running daemon and install new binaries"
-log "  - Optionally enable web API and configure firewall"
-log "  - Create/refresh the systemd service and start it"
-log "==============================================================="
+log "  - Interactively select components (daemon, ctl, tui, gui, web API, firewall)"
+log "  - Download prebuilt binaries or build from source"
+log "  - Install dependencies automatically (if supported)"
+log "  - Stage files in a temp dir for processing"
+log "  - Stop any running services and install new binaries"
+log "  - Configure web API and firewall (if selected)"
+log "  - Install GUI components and create desktop entries"
+log "  - Create/refresh systemd service and start it"
+log "=============================================================================="
 
 # =========================
 # Detect package manager
@@ -249,14 +254,237 @@ DEBUG_DIR="/tmp/burn2cool-debug"
 [ "${DEBUG_INSTALL:-0}" -eq 1 ] && mkdir -p "$DEBUG_DIR"
 
 # =========================
+# Interactive component selection
+# =========================
+# Single-select menu helper (keyboard interactive)
+_singleselect_menu() {
+  local return_value=$1
+  local -n opt_ref=$2
+  local -n def_ref=$3
+  # nameref to caller's return variable
+  local -n out_ref=$1
+
+  stty -echo
+
+  __cursor_blink_on() { printf "\e[?25h"; }
+  __cursor_blink_off() { printf "\e[?25l"; }
+  __cursor_to() { local row=$1; local col=${2:-1}; printf "\e[%s;%sH" "$row" "$col"; }
+  __get_cursor_row() { local row="" col=""; IFS=";" read -rs -d "R" -p $'\E[6n' row col; printf "%s" "${row#*[}"; }
+  __get_keyboard_command() {
+    local key=""
+    IFS="" read -rs -n 1 key &>/dev/null
+    case "$key" in
+    "") printf "enter" ;;
+    " ") printf "select" ;;
+    "q"|"Q") printf "quit" ;;
+    $'\e') IFS="" read -rs -n 2 key &>/dev/null; case "$key" in
+      "[A"|"[D") printf "up" ;;
+      "[B"|"[C") printf "down" ;;
+    esac ;;
+    esac
+  }
+
+  __on_ctrl_c() { __cursor_to "$last_row"; __cursor_blink_on; stty echo; exit 1; }
+  trap "__on_ctrl_c" SIGINT
+
+  local selected=-1
+  # Default: first true entry
+  for i in "${!def_ref[@]}"; do
+    if [[ ${def_ref[i]} == "true" ]]; then selected=$i; break; fi
+  done
+  ((selected < 0)) && selected=0
+
+  # Reserve lines for each option so cursor positioning is stable (like _multiselect_menu)
+  for i in "${!opt_ref[@]}"; do printf "\n"; done
+  local last_row=$(__get_cursor_row)
+  local start_row=$((last_row - ${#opt_ref[@]}))
+
+  __print_options() {
+    local active=$1
+    for i in "${!opt_ref[@]}"; do
+      __cursor_to "$((start_row + i))"
+      printf "("
+      if ((i == ${selected:--1})); then
+        printf "\e[1;32m*\e[0m"
+      else
+        printf " "
+      fi
+      printf ") "
+      if ((i == active)); then
+        printf "\e[7m"
+      fi
+      printf "${opt_ref[i]:-}"
+      if ((i == active)); then
+        printf "\e[27m"
+      fi
+      printf "\n"
+    done
+  }
+
+  __cursor_blink_off
+  local active=0
+  while true; do
+    __print_options "$active"
+    case $(__get_keyboard_command) in
+      "enter") break ;;
+      "select") selected=$active ;;
+      "up") ((active--)); ((active<0)) && active=$((${#opt_ref[@]}-1)) ;;
+      "down") ((active++)); ((active>=${#opt_ref[@]})) && active=0 ;;
+      "quit") stty echo; __cursor_blink_on; exit 1 ;;
+    esac
+  done
+
+  __cursor_to "$last_row"; __cursor_blink_on; stty echo
+  out_ref=$selected
+  trap "" SIGINT
+}
+
+# Multi-select menu helper (keyboard interactive)
+_multiselect_menu() {
+  local return_value=$1
+  local -n opt_ref=$2
+  local -n def_ref=$3
+  # nameref to caller's return array variable (so we can assign directly)
+  local -n out_ref=$1
+
+  stty -echo
+
+  __cursor_blink_on() { printf "\e[?25h"; }
+  __cursor_blink_off() { printf "\e[?25l"; }
+  __cursor_to() { local row=$1; local col=${2:-1}; printf "\e[%s;%sH" "$row" "$col"; }
+  __get_cursor_row() { local row="" col=""; IFS=";" read -rs -d "R" -p $'\E[6n' row col; printf "%s" "${row#*[}"; }
+  __get_keyboard_command() {
+    local key=""
+    IFS="" read -rs -n 1 key &>/dev/null
+    case "$key" in
+    "") printf "enter" ;;
+    " ") printf "toggle_active" ;;
+    "a"|"A") printf "toggle_all" ;;
+    "q"|"Q") printf "quit" ;;
+    $'\e') IFS="" read -rs -n 2 key &>/dev/null; case "$key" in
+      "[A"|"[D") printf "up" ;;
+      "[B"|"[C") printf "down" ;;
+    esac ;;
+    esac
+  }
+  __on_ctrl_c() { __cursor_to "$last_row"; __cursor_blink_on; stty echo; exit 1; }
+  trap "__on_ctrl_c" SIGINT
+
+  out_ref=()
+  local i=0
+  for i in "${!opt_ref[@]}"; do
+    if [[ ${def_ref[i]} == "false" ]]; then out_ref+=("false"); else out_ref+=("true"); fi
+    printf "\n"
+  done
+
+  local start_row="" last_row=""
+  last_row=$(__get_cursor_row)
+  start_row=$((last_row - ${#opt_ref[@]}))
+
+  __print_options() {
+    local index_active=$1
+    local i=0
+    for i in "${!opt_ref[@]}"; do
+      local prefix="[ ]"
+      if [[ ${out_ref[i]} == "true" ]]; then prefix="[\e[1;32m*\e[0m]"; fi
+      __cursor_to "$((start_row + i))"
+      local option="${opt_ref[i]:-}"
+      if ((i == index_active)); then
+        printf "$prefix \e[7m$option\e[27m"
+      else
+        printf "$prefix $option"
+      fi
+      printf "\n"
+    done
+  }
+
+  __cursor_blink_off
+  local active=0
+  while true; do
+    __print_options "$active"
+    case $(__get_keyboard_command) in
+    "enter") __print_options -1; break ;;
+    "toggle_active") if [[ ${out_ref[active]} == "true" ]]; then out_ref[active]="false"; else out_ref[active]="true"; fi ;;
+    "toggle_all") local i=0; if [[ ${out_ref[active]} == "true" ]]; then for i in "${!out_ref[@]}"; do out_ref[i]="false"; done; else for i in "${!out_ref[@]}"; do out_ref[i]="true"; done; fi ;;
+    "quit") __on_ctrl_c ;;
+    "up") active=$((active - 1)); if [[ $active -lt 0 ]]; then active=$((${#opt_ref[@]} - 1)); fi ;;
+    "down") active=$((active + 1)); if [[ $active -ge ${#opt_ref[@]} ]]; then active=0; fi ;;
+    esac
+  done
+
+  __cursor_to "$last_row"
+  __cursor_blink_on
+  stty echo
+  trap "" SIGINT
+}
+
+# Present interactive component selection and populate WANT_* globals
+component_selection() {
+  # Defaults: select all when non-interactive flag is set
+  local options=("daemon (cpu_throttle)" "ctl (cpu_throttle_ctl)" "tui (cpu_throttle_tui)" "gui (GUI zip)" "--- Settings ---" "web API" "firewall ports" "systemd service")
+  local defaults=("true" "true" "true" "true" "false" "false" "false" "false")
+  local selected=()
+  if [ "${YES:-0}" -eq 1 ] || [ "${AUTO_YES:-0}" -eq 1 ]; then
+    # keep defaults true
+    selected=("true" "true" "true" "true" "false" "true" "true" "true")
+  else
+    # Offer a quick single-select first (download mode), then component multiselect
+    printf "Select download mode:\nUse arrow keys to navigate, Space to toggle, Enter to confirm, q to quit.\n\n"
+    local mode_choice=0
+    local mode_options=("Precompiled binary" "Build from source")
+    local mode_defaults=("true" "false")
+    _singleselect_menu mode_choice mode_options mode_defaults
+    if [ "${mode_choice:-0}" -eq 0 ]; then
+      PRESELECTED_MODE="binaries"
+    else
+      PRESELECTED_MODE="source"
+    fi
+    # Clear screen after single select
+    printf "\e[2J\e[H"
+    printf "Select components:\nUse arrow keys to navigate, Space to toggle, Enter to confirm, q to quit.\n\n"
+    _multiselect_menu selected options defaults
+  fi
+
+  WANT_DAEMON=0
+  WANT_CTL=0
+  WANT_TUI=0
+  WANT_GUI=0
+  WANT_WEB=0
+  WANT_FIREWALL=0
+  WANT_SERVICE=0
+  if [ "${selected[0]}" = "true" ]; then WANT_DAEMON=1; fi
+  if [ "${selected[1]}" = "true" ]; then WANT_CTL=1; fi
+  if [ "${selected[2]}" = "true" ]; then WANT_TUI=1; fi
+  if [ "${selected[3]}" = "true" ]; then WANT_GUI=1; fi
+  if [ "${selected[5]}" = "true" ]; then WANT_WEB=1; fi
+  if [ "${selected[6]}" = "true" ]; then WANT_FIREWALL=1; fi
+  if [ "${selected[7]}" = "true" ]; then WANT_SERVICE=1; fi
+
+  log "Component selection: daemon=$WANT_DAEMON ctl=$WANT_CTL tui=$WANT_TUI gui=$WANT_GUI web=$WANT_WEB firewall=$WANT_FIREWALL service=$WANT_SERVICE"
+}
+
+# Run selection now so subsequent download logic can consult WANT_* flags
+set +e
+component_selection
+set -e
+
+# =========================
 # Asset selection logic
 # =========================
 
 choose_mode() {
+  # If an interactive preselection was made earlier, prefer it
+  if [ -n "${PRESELECTED_MODE:-}" ]; then
+    echo "$PRESELECTED_MODE"; return
+  fi
   if [ -n "$FETCH_URL" ]; then echo "fetch"; return; fi
   if [ "$FORCE_BUILD" -eq 1 ] && [ "$FORCE_BINARIES" -eq 1 ]; then
     warn "Both --force-build and --force-binaries set; defaulting to binaries."
     echo "binaries"; return
+  fi
+  # If GUI is selected, force source mode (GUI needs source to build)
+  if [ "${WANT_GUI:-0}" -eq 1 ]; then
+    echo "source"; return
   fi
   if [ "$FORCE_BUILD" -eq 1 ]; then echo "source"; return; fi
   if [ "$FORCE_BINARIES" -eq 1 ]; then echo "binaries"; return; fi
@@ -307,29 +535,41 @@ filter_assets_and_download() {
   fi
 
   local selected=0
+  # Build desired patterns from interactive selection
+  local patterns=()
+  if [ "${WANT_DAEMON:-0}" -eq 1 ]; then patterns+=("$BINARY_NAME"); fi
+  if [ "${WANT_CTL:-0}" -eq 1 ]; then patterns+=("$CTL_BINARY_NAME"); fi
+  if [ "${WANT_TUI:-0}" -eq 1 ]; then patterns+=("$TUI_BIN_NAME"); fi
+  if [ "${WANT_GUI:-0}" -eq 1 ] && [ "${GUI_BUILT:-0}" -eq 0 ]; then patterns+=("gui" "tray" "burn2cool_tray" "gui_tray"); fi
   for i in "${!names[@]}"; do
     n="${names[$i]}"; u="${urls[$i]}"
-    if [[ "$n" =~ \.sh$ ]] || [[ "$n" =~ autobuild ]] || [[ "$n" =~ \.(zip|tar\.gz|tgz)$ ]]; then
+    # skip scripts/build metadata
+    if [[ "$n" =~ \.sh$ ]] || [[ "$n" =~ autobuild ]]; then
       continue
     fi
-    if [[ "$n" == *"$BINARY_NAME"* ]] || [[ "$n" == *"$CTL_BINARY_NAME"* ]] || [[ "$n" == *"$TUI_BIN_NAME"* ]]; then
+    # explicit GUI asset name (exact) support
+    if [ "${WANT_GUI:-0}" -eq 1 ] && [ "${GUI_BUILT:-0}" -eq 0 ] && [ "$n" = "burn2cool_tray.zip" ]; then
+      download_url "$u" "$WORK_DIR/$n"
+      selected=$((selected+1))
+      continue
+    fi
+    # check if name matches any desired pattern
+    local match=0
+    for p in "${patterns[@]}"; do
+      if [[ -n "$p" ]] && [[ "$n" == "$p" ]]; then match=1; break; fi
+    done
+    if [ "$match" -eq 0 ]; then
+      continue
+    fi
+    # download: archives allowed for GUI (zip/tar), binaries get executable bit
+    if [[ "$n" =~ \.(zip|tar\.gz|tgz)$ ]]; then
+      download_url "$u" "$WORK_DIR/$n"
+    else
       download_url "$u" "$WORK_DIR/$n"
       chmod +x "$WORK_DIR/$n" || true
-      selected=$((selected+1))
     fi
+    selected=$((selected+1))
   done
-
-  if [ "$selected" -eq 0 ]; then
-    warn "No direct binary assets matched expected names; attempting fallback by excluding archives."
-    for i in "${!names[@]}"; do
-      n="${names[$i]}"; u="${urls[$i]}"
-      if [[ ! "$n" =~ \.(zip|tar\.gz|tgz|sh)$ ]]; then
-        download_url "$u" "$WORK_DIR/$n"
-        chmod +x "$WORK_DIR/$n" || true
-        selected=$((selected+1))
-      fi
-    done
-  fi
 
   if [ "$selected" -eq 0 ]; then
     err "No suitable binary assets found in the release."
@@ -499,6 +739,40 @@ download_source_and_build() {
     (cd "$src_dir" && make)
   fi
 
+  # Build GUI if selected
+  if [ "${WANT_GUI:-0}" -eq 1 ]; then
+    log "Building GUI component..."
+    # Check and install GUI dependencies
+    local gui_deps=("libgtk-3-dev" "libayatana-appindicator3-dev" "libcurl4-openssl-dev" "libjson-c-dev" "libnotify-dev")
+    local missing_gui_deps=()
+    if ! pkg-config --exists gtk+-3.0 2>/dev/null; then missing_gui_deps+=("libgtk-3-dev"); fi
+    if ! pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && ! pkg-config --exists libappindicator-3.0 2>/dev/null; then missing_gui_deps+=("libayatana-appindicator3-dev"); fi
+    if ! pkg-config --exists libcurl 2>/dev/null; then missing_gui_deps+=("libcurl4-openssl-dev"); fi
+    if ! pkg-config --exists json-c 2>/dev/null; then missing_gui_deps+=("libjson-c-dev"); fi
+    if ! pkg-config --exists libnotify 2>/dev/null; then missing_gui_deps+=("libnotify-dev"); fi
+    if [ ${#missing_gui_deps[@]} -gt 0 ]; then
+      log "Installing GUI dependencies: ${missing_gui_deps[*]}"
+      install_deps "${missing_gui_deps[@]}"
+    fi
+    if [ -d "$src_dir/gui_tray" ]; then
+      local MAKE_SHELL_ARG=""
+      if command -v bash >/dev/null 2>&1; then
+        MAKE_SHELL_ARG="SHELL=/bin/bash"
+      fi
+      (cd "$src_dir/gui_tray" && make $MAKE_SHELL_ARG clean && make $MAKE_SHELL_ARG)
+      if [ -f "$src_dir/gui_tray/burn2cool_tray" ]; then
+        install -m 0755 "$src_dir/gui_tray/burn2cool_tray" "$WORK_DIR/burn2cool_tray"
+        mkdir -p "$WORK_DIR/staging"
+        cp -r "$src_dir/gui_tray/assets" "$src_dir/gui_tray/i18n" "$WORK_DIR/staging/" 2>/dev/null || true
+        GUI_BUILT=1
+      else
+        warn "GUI build failed - binary not found"
+      fi
+    else
+      warn "gui_tray directory not found in source"
+    fi
+  fi
+
   # Collect built binaries (search common build paths)
   local built=0
   for candidate in \
@@ -527,7 +801,7 @@ download_source_and_build() {
     fi
   done
 
-  if [ "$ENABLE_TUI" -eq 1 ]; then
+  if [ "$ENABLE_TUI" -eq 1 ] || [ "${WANT_TUI:-0}" -eq 1 ]; then
     for candidate in \
       "$src_dir/$TUI_BIN_NAME" \
       "$src_dir/bin/$TUI_BIN_NAME" \
@@ -542,9 +816,23 @@ download_source_and_build() {
     done
   fi
 
-  if [ "$built" -eq 0 ]; then
+  if [ "$built" -eq 0 ] && [ "${GUI_BUILT:-0}" -eq 0 ]; then
     err "No suitable binary assets found in the release."
     return 1
+  fi
+
+  # Remove unwanted binaries based on selection
+  if [ "${WANT_DAEMON:-0}" -eq 0 ] && [ -f "$WORK_DIR/$BINARY_NAME" ]; then
+    log "Removing unwanted daemon binary ($BINARY_NAME)"
+    rm -f "$WORK_DIR/$BINARY_NAME"
+  fi
+  if [ "${WANT_CTL:-0}" -eq 0 ] && [ -f "$WORK_DIR/$CTL_BINARY_NAME" ]; then
+    log "Removing unwanted ctl binary ($CTL_BINARY_NAME)"
+    rm -f "$WORK_DIR/$CTL_BINARY_NAME"
+  fi
+  if [ "${WANT_TUI:-0}" -eq 0 ] && [ -f "$WORK_DIR/$TUI_BIN_NAME" ]; then
+    log "Removing unwanted tui binary ($TUI_BIN_NAME)"
+    rm -f "$WORK_DIR/$TUI_BIN_NAME"
   fi
 
   if [ "$DEBUG_INSTALL" -eq 1 ]; then
@@ -599,10 +887,165 @@ log "Staged files in $WORK_DIR:"
 ls -1 "$WORK_DIR" || true
 
 # =========================
+# GUI zip handling: unpack, install into a dedicated dir, create symlink, desktop file and uninstall helper
+# =========================
+unpack_and_install_gui_zip() {
+  if [ "${WANT_GUI:-0}" -ne 1 ]; then return 0; fi
+  local zip="$WORK_DIR/burn2cool_tray.zip"
+  [ -f "$zip" ] || return 0
+
+  log "Found GUI asset: $zip — preparing to install GUI files"
+
+  # ensure unzip is available
+  if ! command -v unzip >/dev/null 2>&1; then
+    warn "'unzip' not found — GUI zip cannot be unpacked. Skipping GUI installation."
+    return 1
+  fi
+
+  local staging="$WORK_DIR/gui_staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  unzip -q "$zip" -d "$staging"
+
+  # Determine extracted root: if single top-level dir, use it
+  local roots
+  roots=("$(find "$staging" -mindepth 1 -maxdepth 1 -printf '%f\n')")
+  local srcdir
+  if [ $(find "$staging" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 ]; then
+    srcdir="$staging/${roots[0]}"
+  else
+    srcdir="$staging"
+  fi
+
+  # Decide install prefix: prefer system path, fallback to user-local
+  local system_share="/usr/local/share/${REPO_NAME}_tray"
+  local user_share="$HOME/.local/share/${REPO_NAME}_tray"
+  local install_dir=""
+
+  if sudo -n true >/dev/null 2>&1; then
+    install_dir="$system_share"
+  else
+    # try to create with sudo; if not possible, use user dir
+    if mkdir -p "$system_share" >/dev/null 2>&1; then
+      install_dir="$system_share"
+    else
+      install_dir="$user_share"
+    fi
+  fi
+
+  log "Installing GUI into: $install_dir"
+  if [ "$install_dir" = "$system_share" ]; then
+    sudo mkdir -p "$install_dir"
+    sudo cp -a "$srcdir/." "$install_dir/"
+    sudo chown -R root:root "$install_dir" || true
+  else
+    mkdir -p "$install_dir"
+    cp -a "$srcdir/." "$install_dir/"
+  fi
+
+  # Find executable binary inside install_dir
+  local binpath
+  binpath=$(find "$install_dir" -type f -name "burn2cool_tray" -perm /u=x,g=x,o=x | head -n1 || true)
+  if [ -z "$binpath" ]; then
+    # Try common locations
+    if [ -x "$install_dir/burn2cool_tray" ]; then binpath="$install_dir/burn2cool_tray"; fi
+    if [ -z "$binpath" ]; then
+      binpath=$(find "$install_dir" -type f -name "burn2cool_tray" | head -n1 || true)
+    fi
+  fi
+
+  # Create symlink in bin path (system or user)
+  local symlink_target
+  if [ "$install_dir" = "$system_share" ]; then
+    symlink_target="/usr/local/bin/burn2cool_tray"
+    if [ -n "$binpath" ]; then
+      sudo ln -sf "$binpath" "$symlink_target"
+    fi
+  else
+    mkdir -p "$HOME/.local/bin"
+    symlink_target="$HOME/.local/bin/burn2cool_tray"
+    if [ -n "$binpath" ]; then
+      ln -sf "$binpath" "$symlink_target"
+    fi
+  fi
+
+  log "Created symlink: $symlink_target -> $binpath"
+
+  # Install desktop file (user-local preferred)
+  local desktop_dir
+  if [ "$install_dir" = "$system_share" ]; then desktop_dir="/usr/share/applications"; else desktop_dir="$HOME/.local/share/applications"; fi
+  mkdir -p "$desktop_dir"
+  local icon_path="$install_dir/icon.png"
+  if [ -f "$install_dir/assets/icon.png" ]; then icon_path="$install_dir/assets/icon.png"; fi
+
+  local desktop_file="$desktop_dir/burn2cool-tray.desktop"
+  cat > "$WORK_DIR/burn2cool-tray.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Burn2Cool Tray
+Exec=$symlink_target
+Icon=$icon_path
+Terminal=false
+Categories=Utility;System;
+EOF
+
+  if [ "$desktop_dir" = "/usr/share/applications" ]; then
+    sudo mv "$WORK_DIR/burn2cool-tray.desktop" "$desktop_file"
+  else
+    mv "$WORK_DIR/burn2cool-tray.desktop" "$desktop_file"
+  fi
+
+  log "Installed desktop file: $desktop_file"
+
+  # Offer autostart (user-level)
+  if prompt_yes_no "Enable GUI autostart for the current user?"; then
+    local autostart_dir="$HOME/.config/autostart"
+    mkdir -p "$autostart_dir"
+    cp "$desktop_file" "$autostart_dir/"
+    log "Autostart enabled: $autostart_dir/$(basename $desktop_file)"
+  fi
+
+  # Create an uninstall helper script inside install_dir
+  local uninstall_sh="$install_dir/uninstall_burn2cool_tray.sh"
+  cat > "$WORK_DIR/uninstall_burn2cool_tray.sh" <<'UNS'
+#!/usr/bin/env bash
+set -euo pipefail
+INSTALL_DIR="__INSTALL_DIR__"
+SYMLINK="__SYMLINK__"
+DESKTOP="__DESKTOP__"
+echo "Removing GUI installation from $INSTALL_DIR"
+if [ -n "$SYMLINK" ] && [ -L "$SYMLINK" ]; then
+  sudo rm -f "$SYMLINK" || true
+fi
+rm -rf "$INSTALL_DIR" || true
+rm -f "$DESKTOP" || true
+rm -f "$HOME/.config/autostart/$(basename "$DESKTOP")" || true
+echo "Uninstall complete"
+UNS
+  # substitute paths
+  sed -e "s|__INSTALL_DIR__|$install_dir|g" -e "s|__SYMLINK__|$symlink_target|g" -e "s|__DESKTOP__|$desktop_file|g" "$WORK_DIR/uninstall_burn2cool_tray.sh" > "$WORK_DIR/uninstall_burn2cool_tray.sh.tmp"
+  mv "$WORK_DIR/uninstall_burn2cool_tray.sh.tmp" "$WORK_DIR/uninstall_burn2cool_tray.sh"
+  chmod +x "$WORK_DIR/uninstall_burn2cool_tray.sh"
+  if [ "$install_dir" = "$system_share" ]; then
+    sudo mv "$WORK_DIR/uninstall_burn2cool_tray.sh" "$install_dir/uninstall_burn2cool_tray.sh"
+  else
+    mv "$WORK_DIR/uninstall_burn2cool_tray.sh" "$install_dir/uninstall_burn2cool_tray.sh"
+  fi
+
+  log "Created uninstall helper at: $install_dir/uninstall_burn2cool_tray.sh"
+}
+
+# Run GUI unpack/install if GUI asset present
+unpack_and_install_gui_zip || true
+
+# =========================
 # Stop running daemon if present
 # =========================
 
 stop_daemon() {
+  # Only stop if daemon is being installed
+  if [ "${WANT_DAEMON:-0}" -eq 0 ]; then return; fi
+
   # Hardened stop: temporarily disable errexit so any unexpected non-zero
   # return values in this function do not kill the entire installer.
   set +e
@@ -699,14 +1142,85 @@ install_bin_if_present() {
 }
 
 BIN_INSTALLED=0
-install_bin_if_present "$BINARY_NAME" "$DEAMON_PATH" && BIN_INSTALLED=1
-install_bin_if_present "$CTL_BINARY_NAME" "$DEAMON_CTL_PATH" || warn "$CTL_BINARY_NAME not found in staged artifacts."
+if [ "${WANT_DAEMON:-0}" -eq 1 ]; then
+  install_bin_if_present "$BINARY_NAME" "$DEAMON_PATH" && BIN_INSTALLED=1
+fi
+if [ "${WANT_CTL:-0}" -eq 1 ]; then
+  install_bin_if_present "$CTL_BINARY_NAME" "$DEAMON_CTL_PATH" || warn "$CTL_BINARY_NAME not found in staged artifacts."
+fi
 
-if [ "$ENABLE_TUI" -eq 1 ]; then
+if [ "$ENABLE_TUI" -eq 1 ] || [ "${WANT_TUI:-0}" -eq 1 ]; then
   install_bin_if_present "$TUI_BIN_NAME" "$TUI_BUILD_PATH" || warn "$TUI_BIN_NAME not found."
 fi
 
-if [ "$BIN_INSTALLED" -eq 0 ]; then
+if [ "${WANT_GUI:-0}" -eq 1 ]; then
+  # In source mode, install from staging; in binary mode, unpack_and_install_gui_zip already did it
+  if [ "${GUI_BUILT:-0}" -eq 1 ]; then
+    # Install to share directory like binary mode
+    gui_install_dir="/usr/local/share/burn2cool_tray"
+    sudo mkdir -p "$gui_install_dir"
+    sudo install -m 0755 "$WORK_DIR/burn2cool_tray" "$gui_install_dir/burn2cool_tray"
+    sudo ln -sf "$gui_install_dir/burn2cool_tray" "/usr/local/bin/burn2cool_tray"
+    log "Created symlink: /usr/local/bin/burn2cool_tray -> $gui_install_dir/burn2cool_tray"
+    # Create desktop file
+    cat << EOF | sudo tee /usr/share/applications/burn2cool-tray.desktop >/dev/null
+[Desktop Entry]
+Name=Burn2Cool Tray
+Exec=/usr/local/bin/burn2cool_tray
+Icon=burn2cool
+Type=Application
+Categories=System;Monitor;
+EOF
+    log "Installed desktop file: /usr/share/applications/burn2cool-tray.desktop"
+    # Install icon
+    sudo mkdir -p /usr/share/icons/hicolor/48x48/apps
+    sudo cp "$WORK_DIR/staging/assets/icon.png" /usr/share/icons/hicolor/48x48/apps/burn2cool.png
+    sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
+    log "Installed application icon"
+    # Ask about autostart
+    if prompt_yes_no "Enable GUI autostart for the current user?" "n"; then
+      mkdir -p ~/.config/autostart
+      cp /usr/share/applications/burn2cool-tray.desktop ~/.config/autostart/
+      log "Enabled autostart for burn2cool_tray"
+    fi
+    # Create uninstall script
+    cat << 'EOF' | sudo tee "$gui_install_dir/uninstall_burn2cool_tray.sh" >/dev/null
+#!/bin/bash
+set -e
+
+echo "Uninstalling burn2cool_tray..."
+
+# Remove binary and symlink
+sudo rm -f /usr/local/bin/burn2cool_tray
+sudo rm -f /usr/local/share/burn2cool_tray/burn2cool_tray
+
+# Remove assets
+sudo rm -rf /usr/local/share/burn2cool_tray
+
+# Remove desktop file
+sudo rm -f /usr/share/applications/burn2cool-tray.desktop
+
+# Remove icon
+sudo rm -f /usr/share/icons/hicolor/48x48/apps/burn2cool.png
+sudo gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
+
+# Remove autostart if exists
+rm -f ~/.config/autostart/burn2cool-tray.desktop
+
+echo "Uninstallation complete."
+EOF
+    sudo chmod +x "$gui_install_dir/uninstall_burn2cool_tray.sh"
+    log "Created uninstall helper at: $gui_install_dir/uninstall_burn2cool_tray.sh"
+  fi
+  # Install assets if built from source
+  if [ "${GUI_BUILT:-0}" -eq 1 ]; then
+    sudo mkdir -p /usr/local/share/burn2cool_tray
+    sudo cp -r "$WORK_DIR/staging/assets" /usr/local/share/burn2cool_tray/ || warn "Failed to install GUI assets"
+    sudo cp -r "$WORK_DIR/staging/i18n" /usr/local/share/burn2cool_tray/ || warn "Failed to install GUI i18n"
+  fi
+fi
+
+if [ "${WANT_DAEMON:-0}" -eq 1 ] && [ "$BIN_INSTALLED" -eq 0 ]; then
   warn "Core daemon ($BINARY_NAME) was not found in staged artifacts. Continuing anyway."
 fi
 
@@ -741,10 +1255,8 @@ choose_port() {
     if is_port_free "$WEB_PORT"; then echo "$WEB_PORT"; return; else warn "Port $WEB_PORT is occupied."; fi
   fi
 
-  if [ "$WEB_ENABLE" -eq 0 ]; then
-    if prompt_yes_no "Enable web API for $BINARY_NAME?"; then
-      WEB_ENABLE=1
-    fi
+  if [ "$WEB_ENABLE" -eq 0 ] && [ "${WANT_WEB:-0}" -eq 1 ]; then
+    WEB_ENABLE=1
   fi
 
   if [ "$WEB_ENABLE" -eq 1 ]; then
@@ -811,16 +1323,16 @@ WantedBy=multi-user.target
   sudo systemctl daemon-reload
 
   if systemctl is-enabled --quiet "$BINARY_NAME"; then
-    log "Service already enabled."
+    log "Daemon service already enabled."
   else
     sudo systemctl enable "$BINARY_NAME" || warn "Failed to enable service"
   fi
   sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
 }
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   create_service
-else
+elif [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   warn "Systemd not available; skipping service setup."
 fi
 
@@ -834,7 +1346,7 @@ configure_firewall() {
   local port="$SELECTED_PORT"
   if [ -z "$port" ]; then return 0; fi
 
-  if prompt_yes_no "Open firewall for port $port?"; then
+  if [ "${WANT_FIREWALL:-0}" -eq 1 ]; then
     if command -v ufw >/dev/null 2>&1; then
       log "Configuring ufw..."
       if sudo ufw status | grep -q "${port}/tcp"; then
@@ -883,12 +1395,23 @@ configure_firewall
 
 log "==============================================================="
 log " Installation complete."
-log " Binary:        $DEAMON_PATH"
-log " Control tool:  $DEAMON_CTL_PATH (if available)"
-if [ "$ENABLE_TUI" -eq 1 ]; then
-  log " TUI:           $TUI_BUILD_PATH (if available)"
+if [ "${WANT_DAEMON:-0}" -eq 1 ]; then
+  log " Binary:        $DEAMON_PATH"
+else
+  log " Binary:        Not selected"
 fi
-if command -v systemctl >/dev/null 2>&1; then
+if [ "${WANT_CTL:-0}" -eq 1 ]; then
+  log " Control tool:  $DEAMON_CTL_PATH"
+else
+  log " Control tool:  Not selected"
+fi
+if [ "$ENABLE_TUI" -eq 1 ] || [ "${WANT_TUI:-0}" -eq 1 ]; then
+  log " TUI:           $TUI_BUILD_PATH"
+fi
+if [ "${WANT_GUI:-0}" -eq 1 ]; then
+  log " GUI:           /usr/local/bin/burn2cool_tray"
+fi
+if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   log " Service:       $SERVICE_PATH"
   log " Systemd unit:  $BINARY_NAME (enabled and restarted)"
 fi

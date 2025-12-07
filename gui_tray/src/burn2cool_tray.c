@@ -93,15 +93,17 @@ static const char *get_loc(const char *path, const char *fallback) {
 }
 
 // Try to load a locale JSON file from i18n/<lang>.json (relative to current working dir).
-static void load_locale(const char *lang) {
-    if (!lang) lang = "en";
-    char path[256];
-    snprintf(path, sizeof(path), "i18n/%s.json", lang);
+static struct json_object *load_locale(const char *lang) {
+    char path[PATH_MAX];
+    FILE *f;
+    struct json_object *root = NULL;
+
+    snprintf(path, sizeof(path), "/usr/local/share/burn2cool_tray/i18n/%s.json", lang);
     char *content = read_file_to_string(path);
     if (!content) {
         // fallback to en
         if (strcmp(lang, "en") != 0) {
-            snprintf(path, sizeof(path), "i18n/en.json");
+            snprintf(path, sizeof(path), "/usr/local/share/burn2cool_tray/i18n/en.json");
             content = read_file_to_string(path);
         }
     }
@@ -199,7 +201,7 @@ static void populate_language_menu(void) {
     }
     g_list_free(children);
 
-    DIR *d = opendir("i18n");
+    DIR *d = opendir("/usr/local/share/burn2cool_tray/i18n");
     if (!d) {
         GtkWidget *item = gtk_menu_item_new_with_label("(no locales)");
         gtk_widget_set_sensitive(item, FALSE);
@@ -218,7 +220,7 @@ static void populate_language_menu(void) {
             snprintf(code, sizeof(code), "%.*s", (int)(len - 5), name);
             // try to read meta.name from file
             char path[256];
-            snprintf(path, sizeof(path), "i18n/%s", name);
+            snprintf(path, sizeof(path), "/usr/local/share/burn2cool_tray/i18n/%s", name);
             char *content = read_file_to_string(path);
             const char *display = code;
             char *label_copy = NULL;
@@ -434,7 +436,7 @@ static void on_show_version(GtkMenuItem *item, gpointer user_data) {
         gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(about_widget), get_loc("about.title", "About this application"));
 
         /* Try to load a large about image from the local assets directory */
-        const char *about_img = "assets/about.png";
+        const char *about_img = "/usr/local/share/burn2cool_tray/assets/about.png";
         if (g_file_test(about_img, G_FILE_TEST_EXISTS)) {
             GError *gerr = NULL;
             GdkPixbuf *pb = gdk_pixbuf_new_from_file(about_img, &gerr);
@@ -501,8 +503,8 @@ static int icon_set_attempts = 0;
 static void try_set_indicator_icon_once(void) {
     if (!indicator) return;
 
-    const char *icon_small = "assets/icon.png";
-    const char *about_img = "assets/about.png";
+    const char *icon_small = "/usr/local/share/burn2cool_tray/assets/icon.png";
+    const char *about_img = "/usr/local/share/burn2cool_tray/assets/about.png";
     /* Try to install a user-local themed icon so desktop environments that
      * prefer icon names (from the icon theme) can show our icon immediately.
      * The installed path follows the hicolor theme layout for 32x32 apps. */

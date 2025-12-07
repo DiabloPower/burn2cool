@@ -1,5 +1,5 @@
 CC = gcc
-CANDIDATE_APPINDICATOR = $(shell pkg-config --exists libappindicator-3.0 2>/dev/null && echo libappindicator-3.0 || (pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && echo ayatana-appindicator3-0.1 || echo ""))
+CANDIDATE_APPINDICATOR = $(shell pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null && echo ayatana-appindicator3-0.1 || (pkg-config --exists libappindicator-3.0 2>/dev/null && echo libappindicator-3.0 || echo ""))
 ifeq ($(CANDIDATE_APPINDICATOR),)
 PKG_APPINDICATOR =
 else
