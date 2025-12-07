@@ -59,6 +59,28 @@ static void on_show_overview(GtkMenuItem *item, gpointer user_data) {
     overview_show(NULL);
 }
 
+// Read config file to check if web_port is set
+static int read_config_web_port() {
+    FILE *fp = fopen("/etc/cpu_throttle.conf", "r");
+    if (!fp) return 0; // no config, use socket
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0') continue;
+        char key[64], value[64];
+        if (sscanf(p, "%63[^=]=%63s", key, value) == 2) {
+            if (strcmp(key, "web_port") == 0) {
+                int port = atoi(value);
+                fclose(fp);
+                return port > 0 ? port : 0;
+            }
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
 // Read a local file into a malloc'd buffer (caller must free)
 static char *read_file_to_string(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -371,7 +393,38 @@ static char *socket_get(const char *cmd) {
 }
 
 static char *http_get(const char *path) {
-    // Try socket first for efficiency
+    static int config_checked = 0;
+    static int use_http_first = 0;
+    if (!config_checked) {
+        int port = read_config_web_port();
+        if (port > 0) {
+            http_port = port;
+            use_http_first = 1;
+        }
+        config_checked = 1;
+    }
+
+    if (use_http_first) {
+        // Try HTTP first if web_port is configured
+        CURL *curl = curl_easy_init();
+        if (curl) {
+            MemoryChunk chunk = { .data = malloc(1), .size = 0 };
+            char *url = http_build_url(path);
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+            CURLcode res = curl_easy_perform(curl);
+            free(url);
+            curl_easy_cleanup(curl);
+            if (res == CURLE_OK) {
+                return chunk.data;
+            }
+            free(chunk.data);
+        }
+    }
+
+    // Try socket
     char *result = NULL;
     if (strcmp(path, "/api/status") == 0) {
         result = socket_get("status json");
@@ -380,23 +433,27 @@ static char *http_get(const char *path) {
     }
     if (result) return result;
 
-    // Fallback to HTTP
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
-    MemoryChunk chunk = { .data = malloc(1), .size = 0 };
-    char *url = http_build_url(path);
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
-    CURLcode res = curl_easy_perform(curl);
-    free(url);
-    curl_easy_cleanup(curl);
-    if (res != CURLE_OK) {
-        free(chunk.data);
-        return NULL;
+    if (!use_http_first) {
+        // Fallback to HTTP if not tried yet
+        CURL *curl = curl_easy_init();
+        if (!curl) return NULL;
+        MemoryChunk chunk = { .data = malloc(1), .size = 0 };
+        char *url = http_build_url(path);
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+        CURLcode res = curl_easy_perform(curl);
+        free(url);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK) {
+            free(chunk.data);
+            return NULL;
+        }
+        return chunk.data;
     }
-    return chunk.data;
+
+    return NULL;
 }
 
 static int http_post_json(const char *path, const char *json, char **out_body) {
