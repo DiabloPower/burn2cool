@@ -39,7 +39,7 @@ int safe_max = 0; // optional safe maximum frequency in kHz
 int temp_max = 95; // maximum temperature threshold in °C (default 95)
 int socket_fd = -1; // unix socket file descriptor
 int http_fd = -1; // HTTP socket file descriptor
-int web_port = DEFAULT_WEB_PORT; // HTTP port (DEFAULT_WEB_PORT = 8086)
+int web_port = 0; // HTTP port (0 = disabled, DEFAULT_WEB_PORT = 8086 when enabled)
 int log_level = LOGLEVEL_NORMAL; // default logging level
 volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
 
