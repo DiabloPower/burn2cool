@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ignore SIGTERM to prevent remote termination
+trap 'log "Received SIGTERM - ignoring to prevent premature termination"' TERM
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Consolidated installer v2 for cpu_throttle
