@@ -107,6 +107,14 @@ static char *socket_get(const char *cmd) {
 }
 
 static char *http_get(const char *path) {
+    // Try socket first for efficiency
+    char *result = NULL;
+    if (strcmp(path, "/api/status") == 0) {
+        result = socket_get("status json");
+    }
+    if (result) return result;
+
+    // Fallback to HTTP
     CURL *curl = curl_easy_init();
     if (!curl) return NULL;
     MemoryChunk chunk = { .data = malloc(1), .size = 0 };
@@ -121,10 +129,7 @@ static char *http_get(const char *path) {
     curl_easy_cleanup(curl);
     if (res != CURLE_OK) {
         free(chunk.data);
-        // Fallback to socket
-        if (strcmp(path, "/api/status") == 0) {
-            return socket_get("status json");
-        }
+        // Fallback to socket (already tried, but just in case)
         return NULL;
     }
     return chunk.data;
