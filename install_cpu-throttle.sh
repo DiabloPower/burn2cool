@@ -1330,8 +1330,9 @@ WantedBy=multi-user.target
   else
     sudo systemctl enable "$BINARY_NAME" || warn "Failed to enable service"
   fi
-  sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
-}
+  # Delay service restart to avoid interfering with installer completion
+  (sleep 2 && sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service") &
+  log "Daemon service enabled (restart delayed to prevent installer termination)"
 
 if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   create_service
