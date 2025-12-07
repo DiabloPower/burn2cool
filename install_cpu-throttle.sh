@@ -1044,6 +1044,7 @@ unpack_and_install_gui_zip || true
 
 stop_daemon() {
   # Only stop if daemon is being installed
+  log "WANT_DAEMON in stop_daemon: ${WANT_DAEMON:-unset}"
   if [ "${WANT_DAEMON:-0}" -eq 0 ]; then return; fi
 
   # Hardened stop: temporarily disable errexit so any unexpected non-zero
