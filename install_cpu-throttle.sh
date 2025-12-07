@@ -1357,9 +1357,8 @@ WantedBy=multi-user.target
   else
     sudo systemctl enable "$BINARY_NAME" || warn "Failed to enable service"
   fi
-  # Skip immediate restart to prevent installer termination in remote environments
-  # User can manually start with: sudo systemctl start cpu_throttle
-  log "Daemon service enabled (manual start required: sudo systemctl start $BINARY_NAME)"
+  sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
+}
 }
 
 if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
