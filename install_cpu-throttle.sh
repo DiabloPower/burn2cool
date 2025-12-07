@@ -116,6 +116,23 @@ prompt_input() {
 }
 
 # =========================
+# Config handling
+# =========================
+
+read_existing_config() {
+  local config_file="/etc/cpu_throttle.conf"
+  local existing_web_port=""
+  if [ -f "$config_file" ]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        web_port) existing_web_port="$value" ;;
+      esac
+    done < "$config_file"
+  fi
+  echo "$existing_web_port"
+}
+
+# =========================
 # Arg parsing
 # =========================
 
@@ -1309,6 +1326,28 @@ choose_port() {
 }
 
 SELECTED_PORT="$(choose_port | head -n1)"
+
+# Check existing config and prompt for changes
+existing_web_port="$(read_existing_config)"
+if [ -n "$existing_web_port" ] && [ "$existing_web_port" != "$SELECTED_PORT" ]; then
+  if [ -z "$SELECTED_PORT" ]; then
+    if prompt_yes_no "Existing config has web_port=$existing_web_port, but web API was not selected in this installation. Remove web_port from config?"; then
+      log "Removing web_port from /etc/cpu_throttle.conf"
+      sudo sed -i '/^web_port=/d' /etc/cpu_throttle.conf || true
+    else
+      log "Keeping existing web_port=$existing_web_port in config"
+    fi
+  else
+    if prompt_yes_no "Existing config has web_port=$existing_web_port, but selected port is $SELECTED_PORT. Update config?"; then
+      log "Updating web_port to $SELECTED_PORT in /etc/cpu_throttle.conf"
+    else
+      SELECTED_PORT="$existing_web_port"
+      log "Keeping existing web_port=$existing_web_port"
+    fi
+  fi
+elif [ -z "$existing_web_port" ] && [ -n "$SELECTED_PORT" ]; then
+  log "No existing web_port in config, will add web_port=$SELECTED_PORT"
+fi
 
 # If a port was selected, persist it in /etc/cpu_throttle.conf (preferred over unit args)
 if [ -n "$SELECTED_PORT" ]; then
