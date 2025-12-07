@@ -127,7 +127,7 @@ while (( "$#" )); do
   case "$1" in
     -y|--yes|--non-interactive) YES=1; AUTO_YES=1 ;;
     --tui|--enable-tui) ENABLE_TUI=1 ;;
-    --install-tui) INSTALL_TUI_PREF=1 ;;
+    --install-tui) WANT_TUI=1 ;;  # Prefer prebuilt TUI, fall back to build
     --force-build) FORCE_BUILD=1 ;;
     --force-binaries) FORCE_BINARIES=1 ;;
     --release-tag) RELEASE_TAG="${2:-}"; shift ;;
