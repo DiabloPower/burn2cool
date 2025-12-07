@@ -1220,7 +1220,7 @@ Categories=System;Monitor;
 EOF
     log "Installed desktop file: /usr/share/applications/burn2cool-tray.desktop"
     # Install icons in multiple sizes for better scalability
-    local icon_sizes="16 22 24 32 48 64 96 128 256 512"
+    icon_sizes="16 22 24 32 48 64 96 128 256 512"
     for size in $icon_sizes; do
       if [ -f "$WORK_DIR/staging/assets/icon-${size}.png" ]; then
         sudo mkdir -p "/usr/share/icons/hicolor/${size}x${size}/apps"
@@ -1253,7 +1253,7 @@ sudo rm -rf /usr/local/share/burn2cool_tray
 sudo rm -f /usr/share/applications/burn2cool-tray.desktop
 
 # Remove icons in multiple sizes
-local icon_sizes="16 22 24 32 48 64 96 128 256 512"
+icon_sizes="16 22 24 32 48 64 96 128 256 512"
 for size in $icon_sizes; do
   sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/burn2cool.png"
 done
