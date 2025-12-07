@@ -1427,3 +1427,5 @@ if [ "$DEBUG_INSTALL" -eq 1 ]; then
   log " Debug artifacts: $DEBUG_DIR"
 fi
 log "==============================================================="
+
+log "Script finished successfully"
