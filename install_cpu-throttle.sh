@@ -1046,84 +1046,9 @@ unpack_and_install_gui_zip || true
 # =========================
 
 stop_daemon() {
-  # Only stop if daemon is being installed
-  if [ "${WANT_DAEMON:-0}" -eq 0 ]; then return; fi
-
-  # Hardened stop: temporarily disable errexit so any unexpected non-zero
-  # return values in this function do not kill the entire installer.
-  set +e
-  local stopped=0
-
-  if command -v systemctl >/dev/null 2>&1; then
-    # If the service is active, stop it (ignore failures)
-    if systemctl is-active --quiet "$BINARY_NAME" 2>/dev/null; then
-      log "Stopping systemd service: $BINARY_NAME"
-      sudo systemctl stop "$BINARY_NAME" >/dev/null 2>&1 || warn "Failed to stop service $BINARY_NAME"
-      # wait briefly and confirm it stopped; if not, escalate
-      local i=0
-      while systemctl is-active --quiet "$BINARY_NAME" 2>/dev/null && [ $i -lt 5 ]; do
-        sleep 1
-        i=$((i+1))
-      done
-      if systemctl is-active --quiet "$BINARY_NAME" 2>/dev/null; then
-        warn "Service $BINARY_NAME still active after stop; skipping kill to avoid killing the installer"
-        # sudo systemctl kill "$BINARY_NAME" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || warn "systemctl kill failed for $BINARY_NAME"
-      fi
-      stopped=1
-    fi
-
-    # Legacy service name cleanup (ignore failures)
-    if systemctl is-active --quiet "cpu-throttle" 2>/dev/null; then
-      log "Stopping legacy systemd service: cpu-throttle"
-      sudo systemctl stop cpu-throttle >/dev/null 2>&1 || true
-      sudo systemctl disable cpu-throttle >/dev/null 2>&1 || true
-      sudo rm -f /etc/systemd/system/cpu-throttle.service >/dev/null 2>&1 || true
-      sudo systemctl daemon-reload >/dev/null 2>&1 || true
-      stopped=1
-    fi
-  fi
-
-  # If pgrep/pkill are available, try to kill any leftover processes matching the daemon
-  if command -v pgrep >/dev/null 2>&1; then
-    if pgrep -f "$DEAMON_PATH" >/dev/null 2>&1 || pgrep "^$BINARY_NAME$" >/dev/null 2>&1; then
-      log "Terminating running processes for $BINARY_NAME"
-      if command -v pkill >/dev/null 2>&1; then
-        # Use more specific pattern to avoid killing the installer script itself
-        sudo pkill -f "$DEAMON_PATH" >/dev/null 2>&1 || true
-        # Only kill processes that are exactly the binary name, not containing it
-        sudo pkill "^$BINARY_NAME$" >/dev/null 2>&1 || true
-      else
-        # fallback: kill by PID list
-        local pids
-        pids="$(pgrep -f "$DEAMON_PATH" || pgrep "^$BINARY_NAME$" || true)"
-        if [ -n "$pids" ]; then
-          for pid in $pids; do
-            sudo kill -9 "$pid" >/dev/null 2>&1 || true
-          done
-        fi
-      fi
-      # small wait and re-check; if processes persist attempt a stronger kill
-      sleep 1
-      if pgrep -f "$DEAMON_PATH" >/dev/null 2>&1 || pgrep "^$BINARY_NAME$" >/dev/null 2>&1; then
-        warn "Processes for $BINARY_NAME still present after pkill; attempting sudo kill -9"
-        local pids2
-        pids2="$(pgrep -f "$DEAMON_PATH" || pgrep "^$BINARY_NAME$" || true)"
-        if [ -n "$pids2" ]; then
-          for pid in $pids2; do
-            sudo kill -9 "$pid" >/dev/null 2>&1 || true
-          done
-        fi
-      fi
-      stopped=1
-    fi
-  fi
-
-  if [ "$stopped" -eq 1 ]; then
-    sleep 1
-  fi
-
-  # restore errexit
-  set -e
+  # Skip daemon stopping to prevent installer termination in remote environments
+  log "Skipping daemon stop to prevent remote installer termination"
+  return
 }
 
 stop_daemon
