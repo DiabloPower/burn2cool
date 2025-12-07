@@ -15,6 +15,8 @@
 #include <errno.h>
 #include <dirent.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #if __has_include("../include/favicon_ico.h")
 #include "../include/favicon_ico.h"
 #define HAVE_EMBEDDED_FAVICON 1
@@ -332,6 +334,42 @@ static char *http_build_url(const char *path) {
     return url;
 }
 
+static char *socket_get(const char *cmd) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) return NULL;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/cpu_throttle.sock", sizeof(addr.sun_path) - 1);
+
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(sock_fd);
+        return NULL;
+    }
+
+    if (send(sock_fd, cmd, strlen(cmd), 0) < 0) {
+        close(sock_fd);
+        return NULL;
+    }
+
+    char *response = malloc(2048);
+    if (!response) {
+        close(sock_fd);
+        return NULL;
+    }
+    ssize_t n = recv(sock_fd, response, 2047, 0);
+    if (n > 0) {
+        response[n] = '\0';
+    } else {
+        free(response);
+        response = NULL;
+    }
+
+    close(sock_fd);
+    return response;
+}
+
 static char *http_get(const char *path) {
     CURL *curl = curl_easy_init();
     if (!curl) return NULL;
@@ -346,6 +384,12 @@ static char *http_get(const char *path) {
     curl_easy_cleanup(curl);
     if (res != CURLE_OK) {
         free(chunk.data);
+        // Fallback to socket
+        if (strcmp(path, "/api/status") == 0) {
+            return socket_get("status json");
+        } else if (strcmp(path, "/api/profiles") == 0) {
+            return socket_get("list-profiles json");
+        }
         return NULL;
     }
     return chunk.data;
