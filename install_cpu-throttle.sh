@@ -1044,7 +1044,6 @@ unpack_and_install_gui_zip || true
 
 stop_daemon() {
   # Only stop if daemon is being installed
-  log "WANT_DAEMON in stop_daemon: ${WANT_DAEMON:-unset}"
   if [ "${WANT_DAEMON:-0}" -eq 0 ]; then return; fi
 
   # Hardened stop: temporarily disable errexit so any unexpected non-zero
@@ -1064,8 +1063,8 @@ stop_daemon() {
         i=$((i+1))
       done
       if systemctl is-active --quiet "$BINARY_NAME" 2>/dev/null; then
-        warn "Service $BINARY_NAME still active after stop; attempting systemctl kill"
-        sudo systemctl kill "$BINARY_NAME" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || warn "systemctl kill failed for $BINARY_NAME"
+        warn "Service $BINARY_NAME still active after stop; skipping kill to avoid killing the installer"
+        # sudo systemctl kill "$BINARY_NAME" --kill-who=all --signal=SIGKILL >/dev/null 2>&1 || warn "systemctl kill failed for $BINARY_NAME"
       fi
       stopped=1
     fi
@@ -1083,14 +1082,17 @@ stop_daemon() {
 
   # If pgrep/pkill are available, try to kill any leftover processes matching the daemon
   if command -v pgrep >/dev/null 2>&1; then
-    if pgrep -f "$DEAMON_PATH" >/dev/null 2>&1 || pgrep -f "$BINARY_NAME" >/dev/null 2>&1; then
+    if pgrep -f "$DEAMON_PATH" >/dev/null 2>&1 || pgrep "^$BINARY_NAME$" >/dev/null 2>&1; then
       log "Terminating running processes for $BINARY_NAME"
       if command -v pkill >/dev/null 2>&1; then
-        sudo pkill -f "$BINARY_NAME" >/dev/null 2>&1 || true
+        # Use more specific pattern to avoid killing the installer script itself
+        sudo pkill -f "$DEAMON_PATH" >/dev/null 2>&1 || true
+        # Only kill processes that are exactly the binary name, not containing it
+        sudo pkill "^$BINARY_NAME$" >/dev/null 2>&1 || true
       else
         # fallback: kill by PID list
         local pids
-        pids="$(pgrep -f "$BINARY_NAME" || true)"
+        pids="$(pgrep -f "$DEAMON_PATH" || pgrep "^$BINARY_NAME$" || true)"
         if [ -n "$pids" ]; then
           for pid in $pids; do
             sudo kill -9 "$pid" >/dev/null 2>&1 || true
@@ -1099,10 +1101,10 @@ stop_daemon() {
       fi
       # small wait and re-check; if processes persist attempt a stronger kill
       sleep 1
-      if pgrep -f "$BINARY_NAME" >/dev/null 2>&1; then
+      if pgrep -f "$DEAMON_PATH" >/dev/null 2>&1 || pgrep "^$BINARY_NAME$" >/dev/null 2>&1; then
         warn "Processes for $BINARY_NAME still present after pkill; attempting sudo kill -9"
         local pids2
-        pids2="$(pgrep -f "$BINARY_NAME" || true)"
+        pids2="$(pgrep -f "$DEAMON_PATH" || pgrep "^$BINARY_NAME$" || true)"
         if [ -n "$pids2" ]; then
           for pid in $pids2; do
             sudo kill -9 "$pid" >/dev/null 2>&1 || true
