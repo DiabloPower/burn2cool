@@ -33,10 +33,6 @@ trap 'log "Received SIGTERM - ignoring to prevent premature termination"' TERM
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Consolidated installer v2 for cpu_throttle
-# - Based on user's draft and existing `install_cpu-throttle.sh`
-# - Preserves provided variable names (including DEAMON_* typos)
-
 # =========================
 # Config and naming
 # =========================
@@ -127,7 +123,7 @@ while (( "$#" )); do
   case "$1" in
     -y|--yes|--non-interactive) YES=1; AUTO_YES=1 ;;
     --tui|--enable-tui) ENABLE_TUI=1 ;;
-    --install-tui) WANT_TUI=1 ;;  # Prefer prebuilt TUI, fall back to build
+    --install-tui) WANT_TUI=1 ;;
     --force-build) FORCE_BUILD=1 ;;
     --force-binaries) FORCE_BINARIES=1 ;;
     --release-tag) RELEASE_TAG="${2:-}"; shift ;;
