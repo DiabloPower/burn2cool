@@ -1082,17 +1082,43 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     }
                 }
                 else if (strcmp(cmd, "status") == 0) {
-                    snprintf(response, sizeof(response), 
-                        "Temperature: %d°C\n"
-                        "Current Freq: %d kHz\n"
-                        "safe_min: %d kHz\n"
-                        "safe_max: %d kHz\n"
-                        "temp_max: %d°C\n",
-                        *current_temp, *current_freq, safe_min, safe_max, temp_max);
+                    if (strcmp(arg, "json") == 0) {
+                        build_status_json(response, sizeof(response));
+                    } else {
+                        snprintf(response, sizeof(response), 
+                            "Temperature: %d°C\n"
+                            "Current Freq: %d kHz\n"
+                            "safe_min: %d kHz\n"
+                            "safe_max: %d kHz\n"
+                            "temp_max: %d°C\n",
+                            *current_temp, *current_freq, safe_min, safe_max, temp_max);
+                    }
                 }
-                else if (strcmp(cmd, "quit") == 0) {
-                    snprintf(response, sizeof(response), "OK: Shutting down\n");
-                    should_exit = 1;
+                else if (strcmp(cmd, "list-profiles") == 0) {
+                    if (strcmp(arg, "json") == 0) {
+                        build_profiles_list_json(response, sizeof(response));
+                    } else {
+                        // For non-json, list as text
+                        DIR *dir = opendir(get_profile_dir());
+                        if (dir) {
+                            struct dirent *ent;
+                            char *ptr = response;
+                            size_t remaining = sizeof(response);
+                            while ((ent = readdir(dir)) && remaining > 2) {
+                                if (ent->d_name[0] == '.') continue;
+                                int written = snprintf(ptr, remaining, "%s\n", ent->d_name);
+                                if (written > 0 && (size_t)written < remaining) {
+                                    ptr += written;
+                                    remaining -= written;
+                                } else {
+                                    break;
+                                }
+                            }
+                            closedir(dir);
+                        } else {
+                            snprintf(response, sizeof(response), "ERROR: Cannot open profiles directory\n");
+                        }
+                    }
                 }
                 else {
                     snprintf(response, sizeof(response), "ERROR: Unknown command\n");
