@@ -1046,9 +1046,10 @@ unpack_and_install_gui_zip || true
 # =========================
 
 stop_daemon() {
-  # Skip daemon stopping in remote environments to prevent installer termination
-  if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ]; then
-    log "Remote environment detected - skipping daemon stop to prevent installer termination"
+  # Skip daemon stopping when script is executed remotely (e.g., via curl)
+  # This prevents the installer from terminating itself during remote execution
+  if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
+    log "Remote script execution detected - skipping daemon stop to prevent installer termination"
     return
   fi
 
