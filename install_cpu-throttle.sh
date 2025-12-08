@@ -11,9 +11,9 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
     
     # Download the script
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh" -o "$SCRIPT_PATH"
+        curl -fsSL "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh?t=$(date +%s)" -o "$SCRIPT_PATH"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh" -O "$SCRIPT_PATH"
+        wget -q "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh?t=$(date +%s)" -O "$SCRIPT_PATH"
     else
         echo "ERROR: Neither curl nor wget available for downloading script"
         exit 1
