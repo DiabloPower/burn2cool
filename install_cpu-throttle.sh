@@ -1433,18 +1433,24 @@ WantedBy=multi-user.target
 create_profile_dir() {
   local profile_dir="/var/lib/cpu_throttle/profiles"
   
+  local service_user="${SUDO_USER:-}"
+  if [ -z "$service_user" ]; then
+    error "SUDO_USER not set. Please run with sudo."
+    return 1
+  fi
+  
   log "Creating global profile directory: $profile_dir"
   sudo mkdir -p "$profile_dir" || warn "Failed to create profile directory"
-  sudo chown -R "${SUDO_USER:-}:${SUDO_USER:-}" "/var/lib/cpu_throttle" || warn "Failed to set ownership"
+  sudo chown -R "${service_user}:${service_user}" "/var/lib/cpu_throttle" || warn "Failed to set ownership"
   
   # Migrate old profiles if they exist
   local user_home
-  user_home=$(eval echo "~${SUDO_USER:-}")
+  user_home=$(eval echo "~${service_user}")
   local old_profile_dir="$user_home/.config/cpu_throttle/profiles"
   if [ -d "$old_profile_dir" ] && [ -n "$(ls -A "$old_profile_dir" 2>/dev/null)" ]; then
     log "Migrating existing profiles from $old_profile_dir to $profile_dir"
     sudo cp -r "$old_profile_dir"/* "$profile_dir"/ 2>/dev/null || warn "Failed to migrate profiles"
-    sudo chown -R "${SUDO_USER:-}:${SUDO_USER:-}" "$profile_dir"
+    sudo chown -R "${service_user}:${service_user}" "$profile_dir"
   fi
 }
 
