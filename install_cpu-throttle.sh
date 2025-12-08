@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Check if running as root, if not, restart with sudo
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script requires root privileges. Restarting with sudo..."
+    exec sudo "$0" "$@"
+fi
+
 # If executed remotely (via curl), download and execute locally to avoid issues
 if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH_SOURCE[0]}" == http* ]]; then
     echo "Remote execution detected - downloading script locally for proper execution..."
