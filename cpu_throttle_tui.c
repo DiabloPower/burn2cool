@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <pwd.h>
 #include <pthread.h>
 #include <time.h>
 #include <ctype.h>
@@ -478,11 +479,7 @@ static void spawn_load_profile_async(const char *name) {
 }
 
 const char* get_profile_dir() {
-    static char path[512];
-    const char *home = getenv("HOME");
-    if (!home) home = "/root";
-    snprintf(path, sizeof(path), "%s/.config/cpu_throttle/profiles", home);
-    return path;
+    return "/var/lib/cpu_throttle/profiles";
 }
 
 // Ensure profile dir exists
@@ -501,26 +498,24 @@ static int ensure_profile_dir(void) {
     return mkdir(dir, 0755);
 }
 
-// Read profiles into array (simple)
+// Read profiles from daemon
 int read_profiles(char names[][256], int max) {
-    const char *dir = get_profile_dir();
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-    struct dirent *ent;
+    char *r = send_unix_command("list-profiles");
+    if (!r) return 0;
+    char *line = strtok(r, "\n");
     int i = 0;
-    while ((ent = readdir(d)) != NULL && i < max) {
-        if (strcmp(ent->d_name, ".")==0 || strcmp(ent->d_name, "..")==0) continue;
-        // ensure regular file
-        char full[512];
-        snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
-        struct stat st;
-        if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
-            strncpy(names[i], ent->d_name, 255);
+    while (line && i < max) {
+        // remove trailing \r if any
+        size_t len = strlen(line);
+        if (len > 0 && line[len-1] == '\r') line[len-1] = '\0';
+        if (line[0]) {
+            strncpy(names[i], line, 255);
             names[i][255] = '\0';
             i++;
         }
+        line = strtok(NULL, "\n");
     }
-    closedir(d);
+    free(r);
     return i;
 }
 
@@ -548,30 +543,13 @@ static void *poller_thread(void *v) {
 
 /* sparklines removed */
 
-// Load profile: read file and send set-* commands
+// Load profile: send load-profile command to daemon
 int load_profile_by_name(const char *name) {
-    char path[512];
-    snprintf(path, sizeof(path), "%s/%s", get_profile_dir(), name);
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        char key[64], val[64];
-        if (sscanf(line, "%63[^=]=%63s", key, val) == 2) {
-            if (strcmp(key, "safe_min") == 0) {
-                char cmd[128]; snprintf(cmd, sizeof(cmd), "set-safe-min %s", val);
-                char *r = send_unix_command(cmd); if (r) free(r);
-            } else if (strcmp(key, "safe_max") == 0) {
-                char cmd[128]; snprintf(cmd, sizeof(cmd), "set-safe-max %s", val);
-                char *r = send_unix_command(cmd); if (r) free(r);
-            } else if (strcmp(key, "temp_max") == 0) {
-                char cmd[128]; snprintf(cmd, sizeof(cmd), "set-temp-max %s", val);
-                char *r = send_unix_command(cmd); if (r) free(r);
-            }
-        }
-    }
-    fclose(f);
-    return 0;
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "load-profile %s", name);
+    char *r = send_unix_command(cmd);
+    if (r) free(r);
+    return 0; // assume success if no error
 }
 
 // Create a profile file with given values

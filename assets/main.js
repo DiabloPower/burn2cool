@@ -22,7 +22,7 @@ function renderList(){
     if(filter && !p.name.toLowerCase().includes(filter) && !p.content.toLowerCase().includes(filter)) continue;
     const el = document.createElement('div');
     el.className = 'profile';
-    el.innerHTML = `<strong>${p.name}</strong><div class='preview'>${escapeHtml(p.content).replace(/\n/g,'<br>')}</div>`;
+    el.innerHTML = `<strong>${p.name}</strong><div class='preview'>${escapeHtml(p.content).replace(/\\n/g,'<br>')}</div>`;
     el.addEventListener('click', ()=>{
       document.getElementById('pname').value = p.name;
       document.getElementById('pcontent').value = p.content;

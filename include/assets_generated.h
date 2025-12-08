@@ -1,1 +1,0 @@
-#define USE_ASSET_HEADERS 1

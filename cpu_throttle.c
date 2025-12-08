@@ -14,6 +14,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <pwd.h>
+#include <pwd.h>
 #include <strings.h>
 #include <sys/time.h>
 #include <poll.h>
@@ -371,11 +372,7 @@ void build_limits_json(char *buffer, size_t size) {
 
 // Profile helpers
 const char* get_profile_dir() {
-    static char path[512];
-    const char *home = getenv("HOME");
-    if (!home) home = "/root";
-    snprintf(path, sizeof(path), "%s/.config/cpu_throttle/profiles", home);
-    return path;
+    return "/var/lib/cpu_throttle/profiles";
 }
 
 int ensure_profile_dir() {
@@ -395,11 +392,57 @@ int ensure_profile_dir() {
     return mkdir(dir, 0755);
 }
 
+// Profile helpers
+int write_profile_file(const char *name, const char *body);
+
+// Create default profiles if none exist
+void create_default_profiles(int min_freq, int max_freq, int base_freq) {
+    const char *dir = get_profile_dir();
+    DIR *d = opendir(dir);
+    if (!d) return; // dir not accessible
+    struct dirent *ent;
+    int has_profiles = 0;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_type == DT_REG && strstr(ent->d_name, ".config")) {
+            has_profiles = 1;
+            break;
+        }
+    }
+    closedir(d);
+    if (has_profiles) return; // already has profiles
+
+    // Create Energy Saver
+    char body[256];
+    snprintf(body, sizeof(body), "safe_min=%d\nsafe_max=%d\ntemp_max=%d\n", min_freq, min_freq, temp_max);
+    if (write_profile_file("Energy Saver", body) == 0) {
+        LOG_INFO("Created default profile: Energy Saver\n");
+    }
+
+    // Create Maximum Power
+    snprintf(body, sizeof(body), "safe_min=%d\nsafe_max=%d\ntemp_max=%d\n", min_freq, max_freq, temp_max);
+    if (write_profile_file("Maximum Power", body) == 0) {
+        LOG_INFO("Created default profile: Maximum Power\n");
+    }
+
+    // Create Work Mode if base_freq available and different from max
+    if (base_freq > 0 && base_freq != max_freq) {
+        snprintf(body, sizeof(body), "safe_min=%d\nsafe_max=%d\ntemp_max=%d\n", min_freq, base_freq, temp_max);
+        if (write_profile_file("Work Mode", body) == 0) {
+            LOG_INFO("Created default profile: Work Mode\n");
+        }
+    }
+}
+
+// Forward declaration
+int read_profile_file(const char *name, char *out, size_t size);
+
 // List profiles as JSON array
 void build_profiles_list_json(char *buffer, size_t size) {
+    LOG_INFO("Building profiles list\n");
     const char *dir = get_profile_dir();
     DIR *d = opendir(dir);
     if (!d) {
+        LOG_ERROR("Failed to open profiles dir: %s\n", dir);
         snprintf(buffer, size, "[]");
         return;
     }
@@ -414,34 +457,92 @@ void build_profiles_list_json(char *buffer, size_t size) {
     while ((ent = readdir(d)) != NULL) {
         // skip hidden entries
         if (ent->d_name[0] == '.') continue;
+        // only .config files
+        if (!strstr(ent->d_name, ".config")) continue;
         char full[512];
         snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
         struct stat st;
         if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
-            // append comma if not first
-            if (!first) {
-                pos += snprintf(buffer + pos, (pos < size) ? size - pos : 0, ",");
+            // extract name without .config
+            char name[256];
+            strncpy(name, ent->d_name, sizeof(name));
+            char *dot = strrchr(name, '.');
+            if (dot) *dot = '\0';
+            // read content
+            char content[4096];
+            if (read_profile_file(name, content, sizeof(content)) == 0) {
+                // escape content for JSON
+                char escaped[8192];
+                size_t ei = 0;
+                for (size_t i = 0; content[i] && ei < sizeof(escaped) - 10; i++) {
+                    if (content[i] == '"') {
+                        escaped[ei++] = '\\';
+                        escaped[ei++] = '"';
+                    } else if (content[i] == '\n') {
+                        escaped[ei++] = '\\';
+                        escaped[ei++] = 'n';
+                    } else if (content[i] == '\\') {
+                        escaped[ei++] = '\\';
+                        escaped[ei++] = '\\';
+                    } else {
+                        escaped[ei++] = content[i];
+                    }
+                }
+                escaped[ei] = '\0';
+                // append comma if not first
+                if (!first) {
+                    pos += snprintf(buffer + pos, (pos < size) ? size - pos : 0, ",");
+                }
+                first = 0;
+                // append object
+                pos += snprintf(buffer + pos, (pos < size) ? size - pos : 0, "{\"name\":\"%s\",\"content\":\"%s\"}", name, escaped);
+                LOG_INFO("Added profile: %s\n", name);
+                // if buffer full, stop early
+                if (pos >= size - 1) break;
+            } else {
+                LOG_ERROR("Failed to read profile: %s\n", name);
             }
-            first = 0;
-            // append quoted name, ensure we don't overflow
-            pos += snprintf(buffer + pos, (pos < size) ? size - pos : 0, "\"%s\"", ent->d_name);
-            // if buffer full, stop early
-            if (pos >= size - 1) break;
         }
     }
     // close array
     pos += snprintf(buffer + pos, (pos < size) ? size - pos : 0, "]");
+    LOG_INFO("Profiles list built: %s\n", buffer);
     closedir(d);
 }
 
 // (Removed) directory-specific profile listing helper — web UI uses global profiles only now.
 
+// URL decode helper functions
+int hex_to_int(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+void url_decode(char *dst, const char *src) {
+    while (*src) {
+        if (*src == '%' && *(src+1) && *(src+2) &&
+            isxdigit(*(src+1)) && isxdigit(*(src+2))) {
+            *dst++ = (hex_to_int(*(src+1)) << 4) | hex_to_int(*(src+2));
+            src += 3;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
 // Read profile file into buffer
 int read_profile_file(const char *name, char *out, size_t size) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", get_profile_dir(), name);
+    snprintf(path, sizeof(path), "%s/%s.config", get_profile_dir(), name);
+    LOG_INFO("Reading profile: %s\n", path);
     FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
+    if (!fp) {
+        LOG_ERROR("Failed to open profile: %s\n", path);
+        return -1;
+    }
     size_t r = fread(out, 1, size - 1, fp);
     out[r] = '\0';
     fclose(fp);
@@ -451,19 +552,42 @@ int read_profile_file(const char *name, char *out, size_t size) {
 // Write profile file from key=value format (body)
 int write_profile_file(const char *name, const char *body) {
     if (ensure_profile_dir() != 0) return -1;
+    char unescaped[4096];
+    size_t i = 0, j = 0;
+    while (body[i] && j < sizeof(unescaped) - 1) {
+        if (body[i] == '\\' && body[i+1] == 'n') {
+            unescaped[j++] = '\n';
+            i += 2;
+        } else {
+            unescaped[j++] = body[i++];
+        }
+    }
+    unescaped[j] = '\0';
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", get_profile_dir(), name);
+    snprintf(path, sizeof(path), "%s/%s.config", get_profile_dir(), name);
     FILE *fp = fopen(path, "w");
-    if (!fp) return -1;
-    fwrite(body, 1, strlen(body), fp);
+    if (!fp) {
+        LOG_ERROR("Failed to open for write: %s, errno: %d\n", path, errno);
+        return -1;
+    }
+    size_t len = strlen(unescaped);
+    size_t written = fwrite(unescaped, 1, len, fp);
+    if (written != len) {
+        LOG_ERROR("Failed to write to file: %s, written: %zu, expected: %zu\n", path, written, len);
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
+    if (chmod(path, 0644) != 0) {
+        LOG_ERROR("Failed to chmod: %s, errno: %d\n", path, errno);
+    }
     return 0;
 }
 
 // Delete profile
 int delete_profile_file(const char *name) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", get_profile_dir(), name);
+    snprintf(path, sizeof(path), "%s/%s.config", get_profile_dir(), name);
     return unlink(path);
 }
 
@@ -537,13 +661,29 @@ const char *html_dashboard =
 "<input id='pname' placeholder='profile filename' />"
 "<textarea id='pcontent' rows='6' placeholder='profile content (key=value lines)'></textarea>"
 "<div>"
-"  <button id='createBtn'>Create</button>"
-"  <button id='saveBtn'>Save</button>"
-"  <button id='deleteBtn'>Delete</button>"
-"  <button id='loadBtn'>Load to daemon</button>"
+"  <button id='createBtn' onclick='createProfile()'>Create</button>"
+"  <button id='saveBtn' onclick='saveProfile()'>Save</button>"
+"  <button id='deleteBtn' onclick='deleteProfile()'>Delete</button>"
+"  <button id='loadBtn' onclick='loadProfile()'>Load to daemon</button>"
 "</div>"
+"<div id='toast' style='position:fixed; top:20px; right:20px; padding:12px 16px; border-radius:6px; background:#333; border:1px solid #555; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:1000; display:none; font-weight:bold;'></div>"
 "</div>"
 "<script>"
+"function showToast(message, type = 'success'){"
+"  console.log('Showing toast:', message, type);"
+"  const toast = document.getElementById('toast');"
+"  console.log('Toast element:', toast);"
+"  toast.innerText = message;"
+"  if (type === 'success') {"
+"    toast.style.background = 'green';"
+"    toast.style.color = 'white';"
+"  } else {"
+"    toast.style.background = 'red';"
+"    toast.style.color = 'white';"
+"  }"
+"  toast.style.display = 'block';"
+"  setTimeout(() => { toast.style.display = 'none'; }, 3000);"
+"}"
 "function update(){"
 "  fetch('/api/status').then(r=>r.json()).then(d=>{"
 "    document.getElementById('temp').textContent=d.temperature+'°C';"
@@ -574,28 +714,29 @@ const char *html_dashboard =
 "}"
 "function loadProfileToEditor(name){"
 "  fetch('/api/profiles/'+encodeURIComponent(name)).then(r=>{ if(!r.ok) throw 0; return r.text(); }).then(t=>{"
-"    document.getElementById('pname').value = name;"
+"    console.log('Loaded to editor'); document.getElementById('pname').value = name;"
 "    document.getElementById('pcontent').value = t;"
-"  }).catch(()=>alert('Failed to load profile'));"
+"    showToast('Profile loaded to editor', 'success');"
+"  }).catch(e=>{ console.log('Load to editor error:', e); showToast('Failed to load profile', 'error'); });"
 "}"
 "function createProfile(){"
 "  const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;"
 "  if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Create failed'); });"
+"  fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok){ showToast('Profile created', 'success'); refreshProfiles(); } else { showToast('Create failed', 'error'); } });"
 "}"
 "function saveProfile(){"
 "  const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;"
 "  if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Save failed'); });"
+"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok){ console.log('Save successful'); showToast('Profile saved', 'success'); refreshProfiles(); } else { console.log('Save failed'); showToast('Save failed', 'error'); } }).catch(e=>{ console.log('Fetch error:', e); });"
 "}"
 "function deleteProfile(){"
 "  const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }"
 "  if(!confirm('Delete '+name+'?')) return;"
-"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else alert('Delete failed'); });"
+"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ showToast('Profile deleted', 'success'); document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else { showToast('Delete failed', 'error'); } });"
 "}"
 "function loadProfile(){"
 "  const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok) alert('Loaded '+name); else alert('Load failed'); }).catch(()=>alert('Load failed'));"
+"  fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok){ showToast('Profile loaded to daemon', 'success'); } else { showToast('Load failed', 'error'); } }).catch(()=>{ showToast('Load failed', 'error'); });"
 "}"
 "document.addEventListener('DOMContentLoaded', ()=>{"
 "  document.getElementById('createBtn').addEventListener('click', createProfile);"
@@ -617,7 +758,7 @@ const char *main_js =
 "let profilesCache = [];\n\n"
 "async function refresh(){\n"
 "  const data = await api('/profiles');\n"
-"  if(!data.ok){ alert('Failed to load profiles'); return; }\n"
+"  if(!data.ok){ return; }\n"
 "  profilesCache = data.profiles;\n"
 "  renderList();\n"
 "}\n\n"
@@ -646,7 +787,7 @@ const char *main_js =
 "  const content = document.getElementById('pcontent').value;\n"
 "  if(!name){ alert('Enter profile filename'); return; }\n"
 "  const r = await api('/profiles', 'POST', {name, content});\n"
-"  if(!r.ok) alert('Error: '+(r.error||'unknown'));\n"
+"  if(!r.ok) ;\n"
 "  else await refresh();\n"
 "}\n\n"
 "async function saveProfile(){\n"
@@ -654,7 +795,7 @@ const char *main_js =
 "  const content = document.getElementById('pcontent').value;\n"
 "  if(!name){ alert('Enter profile filename'); return; }\n"
 "  const r = await api('/profiles/'+encodeURIComponent(name), 'PUT', {content});\n"
-"  if(!r.ok) alert('Error: '+(r.error||'unknown'));\n"
+"  if(!r.ok) ;\n"
 "  else await refresh();\n"
 "}\n\n"
 "async function deleteProfile(){\n"
@@ -662,20 +803,20 @@ const char *main_js =
 "  if(!name){ alert('Enter profile filename'); return; }\n"
 "  if(!confirm('Delete profile '+name+' ?')) return;\n"
 "  const r = await api('/profiles/'+encodeURIComponent(name), 'DELETE');\n"
-"  if(!r.ok) alert('Error: '+(r.error||'unknown'));\n"
+"  if(!r.ok) ;\n"
 "  else { document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; await refresh(); }\n"
 "}\n\n"
 "async function loadProfile(name){\n"
 "  // ask server to send load-profile NAME\n"
 "  const r = await api('/command','POST',{cmd:`load-profile ${name}`});\n"
-"  if(!r.ok) alert('Error sending load-profile');\n"
-"  else alert('Daemon response:\n'+r.resp);\n"
+"  if(!r.ok) ;\n"
+"  else ;\n"
 "}\n\n"
 "async function sendCmd(){\n"
 "  const cmd = document.getElementById('cmdInput').value.trim();\n"
 "  if(!cmd) return;\n"
 "  const r = await api('/command','POST',{cmd});\n"
-"  if(!r.ok) alert('Error');\n"
+"  if(!r.ok) ;\n"
 "  else document.getElementById('statusBox').textContent = r.resp;\n"
 "}\n\n"
 "window.addEventListener('DOMContentLoaded', ()=>{\n"
@@ -810,6 +951,7 @@ void handle_http_request(int client_fd, const char *request) {
             if (nlen >= sizeof(name)) nlen = sizeof(name) - 1;
             memcpy(name, p, nlen);
             name[nlen] = '\0';
+            url_decode(name, name);
             const char *action = slash + 1;
             if (strcmp(action, "load") == 0 && strcmp(method, "POST") == 0) {
                 char body[2048];
@@ -836,7 +978,8 @@ void handle_http_request(int client_fd, const char *request) {
             }
         } else {
             // /api/profiles/<name>
-            const char *prof = p;
+            char prof[256];
+            url_decode(prof, p);
             // sanitize profile name: disallow path traversal and slashes
             if (strstr(prof, "..") || strchr(prof, '/')) {
                 snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"invalid profile name\"}");
@@ -872,20 +1015,25 @@ void handle_http_request(int client_fd, const char *request) {
                             send_http_response(client_fd, "404 Not Found", "application/json", response);
                         }
                     } else if (strcmp(method, "PUT") == 0) {
+                        LOG_INFO("PUT request for profile: %s\n", prof);
                         /* Update profile (JSON {"content":"..."}) */
                         const char *body_start = strstr(request, "\r\n\r\n");
                         if (body_start) {
                             body_start += 4;
                             char content[4096] = {0};
                             if (extract_json_string(body_start, "\"content\"", content, sizeof(content)) == 0) {
+                                LOG_INFO("PUT profile: %s, content length: %zu\n", prof, strlen(content));
                                 if (write_profile_file(prof, content) == 0) {
+                                    LOG_INFO("Saved profile: %s\n", prof);
                                     snprintf(response, sizeof(response), "{\"ok\":true}");
                                     send_http_response(client_fd, "200 OK", "application/json", response);
                                 } else {
+                                    LOG_ERROR("Failed to save profile: %s\n", prof);
                                     snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"write failed\"}");
                                     send_http_response(client_fd, "500 Internal Server Error", "application/json", response);
                                 }
                             } else {
+                                LOG_ERROR("Invalid JSON in PUT for profile: %s\n", prof);
                                 snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"invalid json\"}");
                                 send_http_response(client_fd, "400 Bad Request", "application/json", response);
                             }
@@ -899,7 +1047,9 @@ void handle_http_request(int client_fd, const char *request) {
     else if (strcmp(path, "/api/profiles") == 0 && strcmp(method, "GET") == 0) {
         char listbuf[4096];
         build_profiles_list_json(listbuf, sizeof(listbuf));
-        send_http_response(client_fd, "200 OK", "application/json", listbuf);
+        char resp[8192];
+        snprintf(resp, sizeof(resp), "{\"ok\":true,\"profiles\":%s}", listbuf);
+        send_http_response(client_fd, "200 OK", "application/json", resp);
     }
     
     else if (strcmp(path, "/api/profiles") == 0 && strcmp(method, "POST") == 0) {
@@ -1050,6 +1200,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
         ssize_t n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
         if (n > 0) {
             buffer[n] = '\0';
+            LOG_INFO("Received command: '%s'\n", buffer);
 
             // If the incoming data looks like an HTTP request, pass it to the HTTP handler
             if (strncmp(buffer, "GET ", 4) == 0 || strncmp(buffer, "POST ", 5) == 0 ||
@@ -1063,7 +1214,26 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
             char cmd[64], arg[192];
             char response[512];
 
-            if (sscanf(buffer, "%63s %191s", cmd, arg) >= 1) {
+            // Find first space to split cmd and arg
+            char *space = strchr(buffer, ' ');
+            if (space) {
+                size_t cmd_len = space - buffer;
+                if (cmd_len > 63) cmd_len = 63;
+                strncpy(cmd, buffer, cmd_len);
+                cmd[cmd_len] = '\0';
+                strncpy(arg, space + 1, 191);
+                arg[191] = '\0'; // ensure null termination
+                // trim trailing newline or spaces from arg
+                char *end = arg + strlen(arg) - 1;
+                while (end > arg && (*end == '\n' || *end == '\r' || *end == ' ')) {
+                    *end = '\0';
+                    end--;
+                }
+            } else {
+                strncpy(cmd, buffer, 63);
+                cmd[63] = '\0';
+                arg[0] = '\0';
+            }
                 if (strcmp(cmd, "set-safe-max") == 0 && sscanf(arg, "%d", &safe_max) == 1) {
                     if (safe_max > max_freq_limit) safe_max = max_freq_limit;
                     if (safe_max < min_freq) safe_max = 0;
@@ -1106,12 +1276,23 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                             size_t remaining = sizeof(response);
                             while ((ent = readdir(dir)) && remaining > 2) {
                                 if (ent->d_name[0] == '.') continue;
-                                int written = snprintf(ptr, remaining, "%s\n", ent->d_name);
-                                if (written > 0 && (size_t)written < remaining) {
-                                    ptr += written;
-                                    remaining -= written;
-                                } else {
-                                    break;
+                                // check if regular file and ends with .config
+                                char full[512];
+                                snprintf(full, sizeof(full), "%s/%s", get_profile_dir(), ent->d_name);
+                                struct stat st;
+                                if (stat(full, &st) == 0 && S_ISREG(st.st_mode) && strstr(ent->d_name, ".config")) {
+                                    // remove .config
+                                    char name[256];
+                                    strncpy(name, ent->d_name, sizeof(name));
+                                    char *dot = strrchr(name, '.');
+                                    if (dot) *dot = '\0';
+                                    int written = snprintf(ptr, remaining, "%s\n", name);
+                                    if (written > 0 && (size_t)written < remaining) {
+                                        ptr += written;
+                                        remaining -= written;
+                                    } else {
+                                        break;
+                                    }
                                 }
                             }
                             closedir(dir);
@@ -1120,12 +1301,30 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         }
                     }
                 }
+                else if (strcmp(cmd, "load-profile") == 0) {
+                    char body[4096];
+                    if (read_profile_file(arg, body, sizeof(body)) == 0) {
+                        // apply key=values
+                        char tmp[4096];
+                        strncpy(tmp, body, sizeof(tmp)-1);
+                        char *ln = strtok(tmp, "\n");
+                        while (ln) {
+                            char key[64], val[64];
+                            if (sscanf(ln, "%63[^=]=%63s", key, val) == 2) {
+                                if (strcmp(key, "safe_min") == 0) safe_min = atoi(val);
+                                else if (strcmp(key, "safe_max") == 0) safe_max = atoi(val);
+                                else if (strcmp(key, "temp_max") == 0) temp_max = atoi(val);
+                            }
+                            ln = strtok(NULL, "\n");
+                        }
+                        snprintf(response, sizeof(response), "OK: Loaded profile %s\n", arg);
+                    } else {
+                        snprintf(response, sizeof(response), "ERROR: Profile %s not found\n", arg);
+                    }
+                }
                 else {
                     snprintf(response, sizeof(response), "ERROR: Unknown command\n");
                 }
-            } else {
-                snprintf(response, sizeof(response), "ERROR: Invalid command format\n");
-            }
 
             send(client_fd, response, strlen(response), 0);
         }
@@ -1157,6 +1356,7 @@ void print_help(const char *name) {
 int main(int argc, char *argv[]) {
     // Load config file first (CLI args will override)
     load_config_file();
+    log_level = LOGLEVEL_VERBOSE; // Override config for debugging
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
@@ -1233,12 +1433,19 @@ int main(int argc, char *argv[]) {
     int temp = 0;
     int freq = 0;
 
-    char min_path[512], max_path[512];
+    char min_path[512], max_path[512], base_path[512];
     snprintf(min_path, sizeof(min_path), "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq");
     snprintf(max_path, sizeof(max_path), "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+    snprintf(base_path, sizeof(base_path), "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_base_frequency");
 
     int min_freq = read_freq_value(min_path);
     int max_freq_limit = read_freq_value(max_path);
+    int base_freq = read_freq_value(base_path); // may be -1 if not available
+    if (base_freq <= 0) {
+        // Try alternative path for base frequency
+        snprintf(base_path, sizeof(base_path), "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency");
+        base_freq = read_freq_value(base_path);
+    }
 
     if (min_freq <= 0 || max_freq_limit <= 0) {
         LOG_ERROR("Failed to read min/max CPU frequency\n");
@@ -1251,6 +1458,12 @@ int main(int argc, char *argv[]) {
     cpu_max_freq = max_freq_limit;
     
     LOG_VERBOSE("CPU Frequency range: %d - %d kHz\n", min_freq, max_freq_limit);
+    if (base_freq > 0) {
+        LOG_VERBOSE("CPU Base frequency: %d kHz\n", base_freq);
+    }
+
+    // Create default profiles if none exist
+    create_default_profiles(min_freq, max_freq_limit, base_freq);
     LOG_INFO("CPU Throttle daemon started (PID: %d)\n", getpid());
 
     // Use poll() to wait for incoming connections and run periodic tasks.

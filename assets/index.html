@@ -66,8 +66,23 @@
         <button id='deleteBtn'>Delete</button>
         <button id='loadBtn'>Load to daemon</button>
       </div>
-    </div>
+    <div id='toast' style='position:fixed; top:20px; right:20px; padding:12px 16px; border-radius:6px; background:#333; border:1px solid #555; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:1000; display:none; font-weight:bold;'></div>
     <script>
+      function showToast(message, type = 'success'){
+        console.log('Showing toast:', message, type);
+        const toast = document.getElementById('toast');
+        console.log('Toast element:', toast);
+        toast.innerText = message;
+        if (type === 'success') {
+          toast.style.background = 'green';
+          toast.style.color = 'white';
+        } else {
+          toast.style.background = 'red';
+          toast.style.color = 'white';
+        }
+        toast.style.display = 'block';
+        setTimeout(() => { toast.style.display = 'none'; }, 3000);
+      }
       function update(){
         fetch('/api/status').then(r=>r.json()).then(d=>{
           document.getElementById('temp').textContent=d.temperature+'°C';
@@ -79,7 +94,8 @@
         fetch('/api/settings/'+name,{method:'POST',body:JSON.stringify({value:parseInt(val)}),headers:{'Content-Type':'application/json'}}).then(()=>update());
       }
       function refreshProfiles(){
-        fetch('/api/profiles').then(r=>r.json()).then(list=>{
+        fetch('/api/profiles').then(r=>r.json()).then(data=>{
+          const list = data.profiles || [];
           const select = document.getElementById('profilesSelect');
           const prev = select.value; // remember user's current selection
           select.innerHTML = '';
@@ -87,8 +103,8 @@
             const opt = document.createElement('option'); opt.value=''; opt.textContent='(no profiles)'; select.appendChild(opt); return;
           }
           const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='(select a profile)'; select.appendChild(placeholder);
-          list.forEach(name=>{
-            const opt = document.createElement('option'); opt.value = name; opt.textContent = name; select.appendChild(opt);
+          list.forEach(p=>{
+            const opt = document.createElement('option'); opt.value = p.name; opt.textContent = p.name; select.appendChild(opt);
           });
           // restore previous selection if still present (do not auto-load)
           if(prev){
@@ -105,26 +121,27 @@
         fetch('/api/profiles/'+encodeURIComponent(name)).then(r=>{ if(!r.ok) throw 0; return r.text(); }).then(t=>{
           document.getElementById('pname').value = name;
           document.getElementById('pcontent').value = t;
-        }).catch(()=>alert('Failed to load profile'));
+          showToast('Profile loaded to editor', 'success');
+        }).catch(()=>showToast('Failed to load profile', 'error'));
       }
       function createProfile(){
         const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;
         if(!name){ alert('Enter filename'); return; }
-        fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Create failed'); });
+        fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok){ showToast('Profile created', 'success'); refreshProfiles(); } else showToast('Create failed', 'error'); });
       }
       function saveProfile(){
         const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;
         if(!name){ alert('Enter filename'); return; }
-        fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok) refreshProfiles(); else alert('Save failed'); });
+        fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok){ showToast('Profile saved', 'success'); refreshProfiles(); } else showToast('Save failed', 'error'); });
       }
       function deleteProfile(){
         const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }
         if(!confirm('Delete '+name+'?')) return;
-        fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else alert('Delete failed'); });
+        fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ showToast('Profile deleted', 'success'); document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else showToast('Delete failed', 'error'); });
       }
       function loadProfile(){
         const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }
-        fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok) alert('Loaded '+name); else alert('Load failed'); }).catch(()=>alert('Load failed'));
+        fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok){ showToast('Profile loaded to daemon', 'success'); } else showToast('Load failed', 'error'); }).catch(()=>showToast('Load failed', 'error'));
       }
       document.addEventListener('DOMContentLoaded', ()=>{
         document.getElementById('createBtn').addEventListener('click', createProfile);

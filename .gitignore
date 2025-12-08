@@ -43,4 +43,4 @@ __pycache__/
 
 # Optional: generated C headers for embedded assets are often committed intentionally.
 # If you prefer NOT to commit generated headers, uncomment the next line to ignore them:
-# include/*.h
+include/*.h

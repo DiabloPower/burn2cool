@@ -450,33 +450,8 @@ static int http_post_json(const char *path, const char *json, char **out_body) {
 }
 
 // Parse JSON array of strings using json-c
-static char **parse_json_string_array(const char *json_text, int *out_count) {
-    if (!json_text) { *out_count = 0; return NULL; }
-    struct json_tokener *tok = json_tokener_new();
-    struct json_object *jobj = json_tokener_parse_ex(tok, json_text, strlen(json_text));
-    enum json_tokener_error jerr = json_tokener_get_error(tok);
-    json_tokener_free(tok);
-    if (jerr != json_tokener_success || !jobj) { *out_count = 0; return NULL; }
-    if (!json_object_is_type(jobj, json_type_array)) { json_object_put(jobj); *out_count = 0; return NULL; }
-    size_t len = json_object_array_length(jobj);
-    char **list = calloc(len ? len : 1, sizeof(char*));
-    for (size_t i = 0; i < len; ++i) {
-        struct json_object *elem = json_object_array_get_idx(jobj, i);
-        if (!elem) continue;
-        const char *s = json_object_get_string(elem);
-        if (!s) continue;
-        list[i] = strdup(s);
-    }
-    *out_count = (int)len;
-    json_object_put(jobj);
-    return list;
-}
+// Parse JSON array of strings using json-c (removed, not used)
 
-static void free_string_list(char **list, int count) {
-    if (!list) return;
-    for (int i = 0; i < count; ++i) free(list[i]);
-    free(list);
-}
 
 static void on_open_webui(GtkMenuItem *item, gpointer user_data) {
     (void)item; (void)user_data;
@@ -756,22 +731,64 @@ static void populate_profiles_menu() {
         gtk_widget_show_all(profiles_menu);
         return;
     }
-    int count = 0;
-    char **list = parse_json_string_array(body, &count);
+
+    // Parse JSON response: either {"ok":true,"profiles":[...]} or [...]
+    struct json_object *root = json_tokener_parse(body);
     free(body);
-    if (count == 0) {
+    if (!root) {
+        const char *lbl = get_loc("menu.failed_parse_profiles", "Failed to parse profiles");
+        GtkWidget *item = gtk_menu_item_new_with_label(lbl);
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), item);
+        gtk_widget_show_all(profiles_menu);
+        return;
+    }
+
+    struct json_object *profiles_array = NULL;
+    if (json_object_is_type(root, json_type_object)) {
+        // HTTP response: {"ok":true,"profiles":[...]}
+        if (!json_object_object_get_ex(root, "profiles", &profiles_array) || !json_object_is_type(profiles_array, json_type_array)) {
+            const char *lbl = get_loc("menu.no_profiles_available", "No profiles available");
+            GtkWidget *item = gtk_menu_item_new_with_label(lbl);
+            gtk_widget_set_sensitive(item, FALSE);
+            gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), item);
+            gtk_widget_show_all(profiles_menu);
+            json_object_put(root);
+            return;
+        }
+    } else if (json_object_is_type(root, json_type_array)) {
+        // Socket response: [...]
+        profiles_array = root;
+    } else {
+        const char *lbl = get_loc("menu.failed_parse_profiles", "Failed to parse profiles");
+        GtkWidget *item = gtk_menu_item_new_with_label(lbl);
+        gtk_widget_set_sensitive(item, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), item);
+        gtk_widget_show_all(profiles_menu);
+        json_object_put(root);
+        return;
+    }
+
+    size_t len = json_object_array_length(profiles_array);
+    if (len == 0) {
         const char *lbl = get_loc("menu.no_profiles_available", "No profiles available");
         GtkWidget *item = gtk_menu_item_new_with_label(lbl);
         gtk_widget_set_sensitive(item, FALSE);
         gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), item);
     } else {
-        for (int i = 0; i < count; ++i) {
-            GtkWidget *mi = gtk_menu_item_new_with_label(list[i]);
-            g_signal_connect(mi, "activate", G_CALLBACK(on_profile_activate), g_strdup(list[i]));
-            gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), mi);
+        for (size_t i = 0; i < len; ++i) {
+            struct json_object *obj = json_object_array_get_idx(profiles_array, i);
+            if (!obj || !json_object_is_type(obj, json_type_object)) continue;
+            struct json_object *name_obj = NULL;
+            if (json_object_object_get_ex(obj, "name", &name_obj) && json_object_is_type(name_obj, json_type_string)) {
+                const char *name = json_object_get_string(name_obj);
+                GtkWidget *mi = gtk_menu_item_new_with_label(name);
+                g_signal_connect(mi, "activate", G_CALLBACK(on_profile_activate), g_strdup(name));
+                gtk_menu_shell_append(GTK_MENU_SHELL(profiles_menu), mi);
+            }
         }
     }
-    free_string_list(list, count);
+    json_object_put(root);
     gtk_widget_show_all(profiles_menu);
 }
 

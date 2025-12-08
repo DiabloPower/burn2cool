@@ -1382,6 +1382,12 @@ create_service() {
 
   local exec_path="$BUILD_PATH"
 
+  local service_user="$SUDO_USER"
+  if [ -z "$service_user" ]; then
+    error "SUDO_USER not set. Please run with sudo."
+    return 1
+  fi
+  
   local unit="[Unit]
 Description=${BINARY_NAME} daemon (temperature-based CPU governor)
 After=network.target
@@ -1407,6 +1413,36 @@ WantedBy=multi-user.target
   # Always restart the service after installation
   sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
 }
+
+  # Always restart the service after installation
+  sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
+}
+
+# =========================
+# Create global profile directory
+# =========================
+
+create_profile_dir() {
+  local profile_dir="/var/lib/cpu_throttle/profiles"
+  
+  log "Creating global profile directory: $profile_dir"
+  sudo mkdir -p "$profile_dir" || warn "Failed to create profile directory"
+  sudo chown -R "$SUDO_USER:$SUDO_USER" "/var/lib/cpu_throttle" || warn "Failed to set ownership"
+  
+  # Migrate old profiles if they exist
+  local user_home
+  user_home=$(eval echo "~$SUDO_USER")
+  local old_profile_dir="$user_home/.config/cpu_throttle/profiles"
+  if [ -d "$old_profile_dir" ] && [ -n "$(ls -A "$old_profile_dir" 2>/dev/null)" ]; then
+    log "Migrating existing profiles from $old_profile_dir to $profile_dir"
+    sudo cp -r "$old_profile_dir"/* "$profile_dir"/ 2>/dev/null || warn "Failed to migrate profiles"
+    sudo chown -R "$SUDO_USER:$SUDO_USER" "$profile_dir"
+  fi
+}
+
+if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
+  create_profile_dir
+fi
 
 if command -v systemctl >/dev/null 2>&1 && [ "${WANT_SERVICE:-0}" -eq 1 ]; then
   create_service
