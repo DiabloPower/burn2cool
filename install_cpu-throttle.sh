@@ -1394,7 +1394,7 @@ create_service() {
 
   local exec_path="$BUILD_PATH"
 
-  local service_user="$SUDO_USER"
+  local service_user="${SUDO_USER:-}"
   if [ -z "$service_user" ]; then
     error "SUDO_USER not set. Please run with sudo."
     return 1
@@ -1435,16 +1435,16 @@ create_profile_dir() {
   
   log "Creating global profile directory: $profile_dir"
   sudo mkdir -p "$profile_dir" || warn "Failed to create profile directory"
-  sudo chown -R "$SUDO_USER:$SUDO_USER" "/var/lib/cpu_throttle" || warn "Failed to set ownership"
+  sudo chown -R "${SUDO_USER:-}:${SUDO_USER:-}" "/var/lib/cpu_throttle" || warn "Failed to set ownership"
   
   # Migrate old profiles if they exist
   local user_home
-  user_home=$(eval echo "~$SUDO_USER")
+  user_home=$(eval echo "~${SUDO_USER:-}")
   local old_profile_dir="$user_home/.config/cpu_throttle/profiles"
   if [ -d "$old_profile_dir" ] && [ -n "$(ls -A "$old_profile_dir" 2>/dev/null)" ]; then
     log "Migrating existing profiles from $old_profile_dir to $profile_dir"
     sudo cp -r "$old_profile_dir"/* "$profile_dir"/ 2>/dev/null || warn "Failed to migrate profiles"
-    sudo chown -R "$SUDO_USER:$SUDO_USER" "$profile_dir"
+    sudo chown -R "${SUDO_USER:-}:${SUDO_USER:-}" "$profile_dir"
   fi
 }
 
