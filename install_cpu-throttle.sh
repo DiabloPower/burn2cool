@@ -1396,7 +1396,7 @@ create_service() {
 
   local service_user="${SUDO_USER:-}"
   if [ -z "$service_user" ]; then
-    error "SUDO_USER not set. Please run with sudo."
+    err "SUDO_USER not set. Please run with sudo."
     return 1
   fi
   
@@ -1435,7 +1435,7 @@ create_profile_dir() {
   
   local service_user="${SUDO_USER:-}"
   if [ -z "$service_user" ]; then
-    error "SUDO_USER not set. Please run with sudo."
+    err "SUDO_USER not set. Please run with sudo."
     return 1
   fi
   
