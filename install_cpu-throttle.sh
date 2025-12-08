@@ -1414,10 +1414,6 @@ WantedBy=multi-user.target
   sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
 }
 
-  # Always restart the service after installation
-  sudo systemctl restart "$BINARY_NAME" || warn "Failed to restart service"
-}
-
 # =========================
 # Create global profile directory
 # =========================
