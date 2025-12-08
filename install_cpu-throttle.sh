@@ -9,11 +9,23 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
     TEMP_DIR=$(mktemp -d)
     SCRIPT_PATH="$TEMP_DIR/install_cpu-throttle.sh"
     
-    # Download the script
+    # Download the script using GitHub API to avoid caching issues
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh?cachebust=$RANDOM$RANDOM" -o "$SCRIPT_PATH"
+        DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/DiabloPower/burn2cool/contents/install_cpu-throttle.sh" | sed -n 's/.*"download_url": "\([^"]*\)".*/\1/p')
+        if [ -n "$DOWNLOAD_URL" ]; then
+            curl -fsSL "$DOWNLOAD_URL" -o "$SCRIPT_PATH"
+        else
+            echo "ERROR: Failed to get download URL from GitHub API"
+            exit 1
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh?cachebust=$RANDOM$RANDOM" -O "$SCRIPT_PATH"
+        DOWNLOAD_URL=$(wget -q -O - "https://api.github.com/repos/DiabloPower/burn2cool/contents/install_cpu-throttle.sh" | sed -n 's/.*"download_url": "\([^"]*\)".*/\1/p')
+        if [ -n "$DOWNLOAD_URL" ]; then
+            wget -q "$DOWNLOAD_URL" -O "$SCRIPT_PATH"
+        else
+            echo "ERROR: Failed to get download URL from GitHub API"
+            exit 1
+        fi
     else
         echo "ERROR: Neither curl nor wget available for downloading script"
         exit 1
