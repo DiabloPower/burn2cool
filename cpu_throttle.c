@@ -1386,7 +1386,10 @@ int read_avg_cpu_temp() {
     }
     closedir(dir);
     if (count == 0) return -1;
-    return total_temp / count;
+    int avg = total_temp / count;
+    // Apply offset for avg_temp to reduce throttling frequency
+    if (use_avg_temp) avg -= 10;
+    return avg;
 }
 
 int detect_cpu_thermal_zone() {
