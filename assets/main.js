@@ -57,7 +57,8 @@ async function saveProfile(){
 async function deleteProfile(){
   const name = document.getElementById('pname').value.trim();
   if(!name){ alert('Enter profile filename'); return; }
-  if(!confirm('Delete profile '+name+' ?')) return;
+  const ok = await window.showConfirm('Delete profile '+name+' ?');
+  if(!ok) return;
   const r = await api('/profiles/'+encodeURIComponent(name), 'DELETE');
   if(!r.ok) alert('Error: '+(r.error||'unknown'));
   else { document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; await refresh(); }
@@ -79,13 +80,24 @@ async function sendCmd(){
 }
 
 window.addEventListener('DOMContentLoaded', ()=>{
-  document.getElementById('refresh').addEventListener('click', refresh);
-  document.getElementById('create').addEventListener('click', createProfile);
-  document.getElementById('save').addEventListener('click', saveProfile);
-  document.getElementById('delete').addEventListener('click', deleteProfile);
-  document.getElementById('load').addEventListener('click', ()=>{ const n=document.getElementById('pname').value.trim(); if(n) loadProfile(n); });
+  // allow both naming conventions for legacy/internal scripts
+  const refreshBtn = document.getElementById('refresh') || document.getElementById('refreshBtn');
+  if (refreshBtn) refreshBtn.addEventListener('click', refresh);
+  const createBtn = document.getElementById('create') || document.getElementById('createBtn');
+  if (createBtn) createBtn.addEventListener('click', createProfile);
+  const saveBtn = document.getElementById('save') || document.getElementById('saveBtn');
+  if (saveBtn) saveBtn.addEventListener('click', saveProfile);
+  const deleteBtn = document.getElementById('delete') || document.getElementById('deleteBtn');
+  if (deleteBtn) deleteBtn.addEventListener('click', deleteProfile);
+  const loadBtn = document.getElementById('load') || document.getElementById('loadBtn');
+  if (loadBtn) loadBtn.addEventListener('click', ()=>{ const n=document.getElementById('pname').value.trim(); if(n) loadProfile(n); });
   document.getElementById('sendCmd').addEventListener('click', sendCmd);
   document.getElementById('filter').addEventListener('keydown', (e)=>{ if(e.key==='Enter') refresh(); });
   document.getElementById('clearFilter').addEventListener('click', ()=>{ document.getElementById('filter').value=''; refresh(); });
   refresh();
 });
+
+// shim: expose Promise-based showConfirm if not present (e.g., when index.html modal not loaded)
+if (typeof window.showConfirm !== 'function') {
+  window.showConfirm = function(msg){ return new Promise((resolve)=>{ resolve(window.confirm(msg)); }); };
+}

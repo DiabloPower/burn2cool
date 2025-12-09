@@ -41,6 +41,9 @@ void print_help(const char *name) {
     printf("  set-safe-max <freq>    Set maximum frequency in kHz\n");
     printf("  set-safe-min <freq>    Set minimum frequency in kHz\n");
     printf("  set-temp-max <temp>    Set maximum temperature in °C\n");
+    printf("  set-thermal-zone <num> Set thermal zone (-1=auto, 0-100)\n");
+    printf("  set-use-avg-temp <0|1> Use average CPU temperature (0=no, 1=yes)\n");
+    printf("  set-excluded-types <csv>  Comma-separated thermal type names to exclude (e.g. INT3400,INT3402)\n");
     printf("  status                 Show current status\n");
     printf("  quit                   Shutdown cpu_throttle daemon\n");
     printf("\nProfile commands:\n");
@@ -48,6 +51,13 @@ void print_help(const char *name) {
     printf("  load-profile <name>    Load settings from a profile\n");
     printf("  list-profiles          List all saved profiles\n");
     printf("  delete-profile <name>  Delete a profile\n");
+    printf("  get-profile <name>     Print profile contents\n");
+    printf("  put-profile <name> <file>  Upload profile contents from a file\n");
+    printf("  version                Print daemon version\n");
+    printf("  limits                 Print CPU min/max limits\n");
+    printf("  zones                  Print thermal zones\n");
+    printf("  restart                Restart the daemon (if running)\n");
+    printf("  start                  Start the daemon (systemctl or background)\n");
     printf("\nExamples:\n");
     printf("  %s set-safe-max 3000000\n", name);
     printf("  %s save-profile gaming\n", name);
@@ -169,6 +179,8 @@ void load_profile(const char *profile_name) {
     send_command(cmd);
 }
 
+// Client: streaming upload does not need base64
+
 void list_profiles() {
     char *response = NULL;
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -228,6 +240,66 @@ void delete_profile(const char *profile_name) {
     }
 }
 
+void get_profile(const char *profile_name) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) { perror("socket"); return; }
+    struct sockaddr_un addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); return; }
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "get-profile %s", profile_name);
+    send(sock_fd, cmd, strlen(cmd), 0);
+    char response[8192];
+    ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+    close(sock_fd);
+    if (n > 0) { response[n] = '\0'; printf("%s", response); }
+}
+
+void put_profile(const char *profile_name, const char *file_path) {
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) { fprintf(stderr, "Error: Cannot open file %s\n", file_path); return; }
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) { perror("socket"); fclose(fp); return; }
+    struct sockaddr_un addr;
+    memset(&addr,0,sizeof(addr)); addr.sun_family = AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); fclose(fp); return; }
+
+    // Send header: put-profile <name> <len>\n
+    char header[512];
+    int hlen = snprintf(header, sizeof(header), "put-profile %s %ld\n", profile_name, fsize);
+    if (hlen < 0 || hlen >= (int)sizeof(header)) { fprintf(stderr, "Error: header too large\n"); close(sock_fd); fclose(fp); return; }
+    if (send(sock_fd, header, hlen, 0) != hlen) { perror("send header"); close(sock_fd); fclose(fp); return; }
+
+    // Stream file data in chunks to avoid high memory usage
+    char sendbuf[4096];
+    size_t remaining = (size_t)fsize;
+    while (remaining > 0) {
+        size_t toread = remaining > sizeof(sendbuf) ? sizeof(sendbuf) : remaining;
+        size_t r = fread(sendbuf, 1, toread, fp);
+        if (r <= 0) { fprintf(stderr, "Error: fread failed\n"); close(sock_fd); fclose(fp); return; }
+        size_t off = 0;
+        while (off < r) {
+            ssize_t s = send(sock_fd, sendbuf + off, r - off, 0);
+            if (s <= 0) { perror("send"); close(sock_fd); fclose(fp); return; }
+            off += (size_t)s;
+        }
+        remaining -= r;
+    }
+    fclose(fp);
+
+    // Read response
+    char response[1024];
+    ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+    if (n > 0) { response[n] = '\0'; printf("%s\n", response); }
+    close(sock_fd);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         print_help(argv[0]);
@@ -263,6 +335,31 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         delete_profile(argv[2]);
+        return 0;
+    }
+    else if (strcmp(argv[1], "get-profile") == 0) {
+        if (argc < 3) { fprintf(stderr, "Error: Profile name required\n"); return 1; }
+        get_profile(argv[2]);
+        return 0;
+    }
+    else if (strcmp(argv[1], "put-profile") == 0) {
+        if (argc < 4) { fprintf(stderr, "Error: Profile name and file required\n"); return 1; }
+        put_profile(argv[2], argv[3]);
+        return 0;
+    }
+    else if (strcmp(argv[1], "start") == 0) {
+        // Try to start via systemctl first
+        if (system("systemctl start cpu_throttle.service") == 0) {
+            printf("Started cpu_throttle via systemctl\n");
+            return 0;
+        }
+        // Fallback: attempt to launch in background
+        if (fork() == 0) {
+            // Child
+            execlp("cpu_throttle", "cpu_throttle", "--web-port", NULL);
+            _exit(1);
+        }
+        printf("Started cpu_throttle in background\n");
         return 0;
     }
 
