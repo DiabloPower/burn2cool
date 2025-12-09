@@ -45,6 +45,7 @@ int log_level = LOGLEVEL_NORMAL; // default logging level
 volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
 int thermal_zone = -1; // thermal zone number (-1 = auto-detect, prefer zone 0 if CPU)
 int use_avg_temp = 0; // use average temperature from CPU thermal zones
+int last_throttle_temp = 0; // hysteresis for throttling
 
 // Current state for API responses
 int current_temp = 0;
@@ -1655,16 +1656,27 @@ int main(int argc, char *argv[]) {
             current_temp = temp;
 
             int new_freq = max_freq;
-            int throttle_start = temp_max - 20; // Start throttling 20°C below temp_max
+            int throttle_start = temp_max - 30; // Start throttling 30°C below temp_max for gentler curve
+            int hysteresis = 3; // °C hysteresis to prevent oscillations
 
+            // Calculate target frequency
+            int target_freq = max_freq;
             if (temp >= temp_max) {
-                new_freq = min_freq;
+                target_freq = min_freq;
             } else if (temp >= throttle_start) {
                 // Linear scaling from max_freq at throttle_start to min_freq at temp_max
                 int temp_range = temp_max - throttle_start;
                 int freq_range = max_freq - min_freq;
                 int temp_above_start = temp - throttle_start;
-                new_freq = max_freq - (freq_range * temp_above_start) / temp_range;
+                target_freq = max_freq - (freq_range * temp_above_start) / temp_range;
+            }
+
+            // Apply hysteresis: only change if temp deviates significantly from last throttle point
+            if (abs(temp - last_throttle_temp) >= hysteresis || last_throttle_temp == 0) {
+                new_freq = target_freq;
+                last_throttle_temp = temp;
+            } else {
+                new_freq = current_freq; // keep current frequency
             }
 
             if (safe_min > 0 && temp < temp_max && new_freq < safe_min) new_freq = safe_min;
