@@ -1388,7 +1388,7 @@ int read_avg_cpu_temp() {
     if (count == 0) return -1;
     int avg = total_temp / count;
     // Apply offset for avg_temp to reduce throttling frequency
-    if (use_avg_temp) avg -= 10;
+    if (use_avg_temp) avg -= 5;
     return avg;
 }
 
