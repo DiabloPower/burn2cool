@@ -1,3 +1,5 @@
+// (qsort comparator declared lower near zone_entry_t definition)
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +26,7 @@
 #define PID_FILE "/var/run/cpu_throttle.pid"
 #define CONFIG_FILE "/etc/cpu_throttle.conf"
 #define DEFAULT_WEB_PORT 8086  // Intel 8086 tribute!
-#define DAEMON_VERSION "3.0"
+#define DAEMON_VERSION "4.0"
 
 // Logging levels
 #define LOGLEVEL_SILENT 0
@@ -43,14 +45,29 @@ int http_fd = -1; // HTTP socket file descriptor
 int web_port = 0; // HTTP port (0 = disabled, DEFAULT_WEB_PORT = 8086 when enabled)
 int log_level = LOGLEVEL_NORMAL; // default logging level
 volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
-int thermal_zone = -1; // thermal zone number (-1 = auto-detect)
-int use_avg_temp = 0; // use average temperature from all CPU zones
+volatile sig_atomic_t should_restart = 0; // request restart by exec-ing self
+int thermal_zone = -1; // thermal zone number (-1 = auto-detect, prefer zone 0 if CPU)
+int use_avg_temp = 0; // use average temperature from CPU thermal zones
+int last_throttle_temp = 0; // hysteresis for throttling
+
+// Zone entry representation for JSON generation and sorting
+typedef struct zone_entry { int zone_num; char type[256]; int temp_c; } zone_entry_t;
+
+// Compare function for qsort
+static int zone_entry_cmp(const void *a, const void *b) {
+    const zone_entry_t *za = (const zone_entry_t*)a;
+    const zone_entry_t *zb = (const zone_entry_t*)b;
+    if (za->zone_num < zb->zone_num) return -1;
+    if (za->zone_num > zb->zone_num) return 1;
+    return 0;
+}
 
 // Current state for API responses
 int current_temp = 0;
 int current_freq = 0;
 int cpu_min_freq = 0;
 int cpu_max_freq = 0;
+char **saved_argv = NULL;
 
 /* Optional generated asset headers. Run `make assets` to generate headers in
  * `include/` and this file `include/assets_generated.h` will define
@@ -118,6 +135,8 @@ int write_pid_file() {
     return 0;
 }
 
+char excluded_types_config[512] = "int3400,int3402,int3403,int3404,int3405,int3406,int3407";
+
 void load_config_file() {
     FILE *fp = fopen(CONFIG_FILE, "r");
     if (!fp) {
@@ -152,6 +171,7 @@ void load_config_file() {
                 LOG_VERBOSE("Config: safe_max = %d\n", safe_max);
             } else if (strcmp(key, "sensor") == 0) {
                 strncpy(temp_path, value, sizeof(temp_path) - 1);
+                temp_path[sizeof(temp_path) - 1] = '\0';
                 LOG_VERBOSE("Config: sensor = %s\n", temp_path);
             } else if (strcmp(key, "thermal_zone") == 0) {
                 thermal_zone = atoi(value);
@@ -162,12 +182,67 @@ void load_config_file() {
             } else if (strcmp(key, "web_port") == 0) {
                 web_port = atoi(value);
                 LOG_VERBOSE("Config: web_port = %d\n", web_port);
+            } else if (strcmp(key, "excluded_types") == 0) {
+                strncpy(excluded_types_config, value, sizeof(excluded_types_config)-1);
+                excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                LOG_VERBOSE("Config: excluded_types = %s\n", excluded_types_config);
             } else {
                 LOG_VERBOSE("Config: Unknown key '%s' at line %d\n", key, line_num);
             }
         }
     }
     fclose(fp);
+}
+
+void save_config_file() {
+    FILE *fp = fopen(CONFIG_FILE, "w");
+    if (!fp) {
+        LOG_ERROR("Failed to open config file for writing: %s\n", CONFIG_FILE);
+        return;
+    }
+    
+    fprintf(fp, "# CPU Throttle Configuration\n");
+    fprintf(fp, "temp_max=%d\n", temp_max);
+    fprintf(fp, "safe_min=%d\n", safe_min);
+    fprintf(fp, "safe_max=%d\n", safe_max);
+    fprintf(fp, "sensor=%s\n", temp_path);
+    fprintf(fp, "thermal_zone=%d\n", thermal_zone);
+    fprintf(fp, "avg_temp=%d\n", use_avg_temp);
+    fprintf(fp, "web_port=%d\n", web_port);
+    fprintf(fp, "excluded_types=%s\n", excluded_types_config);
+    
+    fclose(fp);
+    LOG_INFO("Configuration saved to %s\n", CONFIG_FILE);
+}
+
+int read_avg_cpu_temp(void);
+int detect_cpu_thermal_zone(void);
+void set_thermal_zone_path(int zone);
+// Decide which thermal zone types should be excluded from average calculations
+static int is_excluded_thermal_type(const char *lower_type) {
+    if (!lower_type) return 0;
+    // Check configured excluded types first (comma separated list)
+    if (excluded_types_config && excluded_types_config[0]) {
+        char tmp[512];
+        strncpy(tmp, excluded_types_config, sizeof(tmp)-1);
+        tmp[sizeof(tmp)-1] = '\0';
+        char *tok = strtok(tmp, ",");
+        while (tok) {
+            // normalize token to lowercase
+            char t[256];
+            strncpy(t, tok, sizeof(t)-1);
+            t[sizeof(t)-1] = '\0';
+            for (char *p = t; *p; ++p) *p = tolower(*p);
+            // exact or substring match in the lower_type
+            if (strcmp(t, lower_type) == 0 || strstr(lower_type, t)) return 1;
+            tok = strtok(NULL, ",");
+        }
+    }
+    // Fallback to known defaults if no config provided
+    if (strstr(lower_type, "int3400") || strstr(lower_type, "int3402") || strstr(lower_type, "int3403") || strstr(lower_type, "int3404") || strstr(lower_type, "int3405") || strstr(lower_type, "int3406") || strstr(lower_type, "int3407")) {
+        return 1;
+    }
+    return 0;
 }
 
 int read_temp() {
@@ -177,7 +252,10 @@ int read_temp() {
     FILE *fp = fopen(temp_path, "r");
     if (!fp) return -1;
     int temp_raw;
-    fscanf(fp, "%d", &temp_raw);
+    if (fscanf(fp, "%d", &temp_raw) != 1) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return temp_raw / 1000;
 }
@@ -186,7 +264,10 @@ int read_freq_value(const char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp) return -1;
     int val;
-    fscanf(fp, "%d", &val);
+    if (fscanf(fp, "%d", &val) != 1) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return val;
 }
@@ -237,6 +318,7 @@ int setup_socket() {
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
     
     if (bind(socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
@@ -365,20 +447,129 @@ void build_status_json(char *buffer, size_t size) {
              "\"safe_min\":%d,"
              "\"safe_max\":%d,"
              "\"temp_max\":%d,"
-             "\"sensor\":\"%s\""
+             "\"sensor\":\"%s\","
+             "\"thermal_zone\":%d,"
+             "\"use_avg_temp\":%s"
              "}",
-             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path);
+             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false");
 }
 
-// JSON helper - build limits response
+// JSON helper - build zones response
+void build_zones_json(char *buffer, size_t size) {
+    DIR *dir = opendir("/sys/class/thermal");
+    if (!dir) {
+        snprintf(buffer, size, "{\"zones\":[]}");
+        return;
+    }
+    struct dirent *entry;
+    char *buf = buffer;
+    size_t remaining = size - 1;
+    // Collect zones first
+    zone_entry_t zones[128];
+    int zcount = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "thermal_zone", 12) == 0) {
+            int zone_num = atoi(entry->d_name + 12);
+            char type_path[512];
+            snprintf(type_path, sizeof(type_path), "/sys/class/thermal/%s/type", entry->d_name);
+            FILE *fp = fopen(type_path, "r");
+            char type[256] = "unknown";
+            if (fp) {
+                if (fgets(type, sizeof(type), fp)) {
+                    type[strcspn(type, "\n")] = 0;
+                }
+                fclose(fp);
+            }
+            char temp_path_test[512];
+            snprintf(temp_path_test, sizeof(temp_path_test), "/sys/class/thermal/%s/temp", entry->d_name);
+            FILE *temp_fp = fopen(temp_path_test, "r");
+            int temp_c = -1;
+            if (temp_fp) {
+                int temp_raw;
+                if (fscanf(temp_fp, "%d", &temp_raw) == 1) {
+                    temp_c = temp_raw / 1000;
+                }
+                fclose(temp_fp);
+            }
+            int excluded = 0;
+            char lower_type[256]; strcpy(lower_type, type); for (char *p = lower_type; *p; ++p) *p = tolower(*p);
+            if (is_excluded_thermal_type(lower_type)) excluded = 1;
+            if (zcount < (int)(sizeof(zones) / sizeof(zones[0]))) {
+                zones[zcount].zone_num = zone_num;
+                strncpy(zones[zcount].type, type, sizeof(zones[zcount].type)-1);
+                zones[zcount].type[sizeof(zones[zcount].type)-1] = '\0';
+                zones[zcount].temp_c = temp_c;
+                // mark excluded by negating temp to -100 to signal it for JSON (special value)
+                if (excluded) zones[zcount].temp_c = -12345;
+                zcount++;
+            }
+        }
+    }
+    closedir(dir);
+    // Sort zones by zone number
+    if (zcount > 1) {
+        extern int zone_entry_cmp(const void *a, const void *b);
+        qsort(zones, zcount, sizeof(zones[0]), zone_entry_cmp);
+    }
+    // Build JSON
+    buf += snprintf(buf, remaining, "{\"zones\":[");
+    remaining -= (buf - buffer);
+    for (int i = 0; i < zcount; ++i) {
+        if (i > 0) { buf += snprintf(buf, remaining, ","); remaining -= (buf - buffer); }
+        int excluded = (zones[i].temp_c == -12345);
+        int temp_val = excluded ? -1 : zones[i].temp_c;
+        if (excluded) {
+            buf += snprintf(buf, remaining, "{\"zone\":%d,\"type\":\"%s\",\"temp\":null,\"excluded\":true}", zones[i].zone_num, zones[i].type);
+        } else {
+            buf += snprintf(buf, remaining, "{\"zone\":%d,\"type\":\"%s\",\"temp\":%d,\"excluded\":false}", zones[i].zone_num, zones[i].type, temp_val);
+        }
+        remaining -= (buf - buffer);
+    }
+    buf += snprintf(buf, remaining, "]}");
+}
+
 void build_limits_json(char *buffer, size_t size) {
+    char sensor_tmp[256];
+    strncpy(sensor_tmp, temp_path, sizeof(sensor_tmp)-1);
+    sensor_tmp[sizeof(sensor_tmp)-1] = '\0';
     snprintf(buffer, size,
              "{"
              "\"cpu_min_freq\":%d,"
              "\"cpu_max_freq\":%d,"
              "\"temp_sensor\":\"%s\""
              "}",
-             cpu_min_freq, cpu_max_freq, temp_path);
+             cpu_min_freq, cpu_max_freq, sensor_tmp);
+}
+
+// Minimal base64 decode helper (ignores invalid characters)
+static int base64_char_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+int base64_decode(const char *in, unsigned char *out, size_t *out_len) {
+    size_t ilen = strlen(in);
+    size_t oidx = 0;
+    int val = 0, valb = -8;
+    for (size_t i = 0; i < ilen; ++i) {
+        char ch = in[i];
+        if (ch == '=') break; // padding: stop processing
+        int c = base64_char_val(ch);
+        if (c < 0) continue; // skip whitespace or invalid chars
+        val = (val << 6) + c;
+        valb += 6;
+        if (valb >= 0) {
+            if (out) out[oidx] = (unsigned char)((val >> valb) & 0xFF);
+            oidx++;
+            valb -= 8;
+        }
+    }
+    if (out_len) *out_len = oidx;
+    return 0;
 }
 
 // Profile helpers
@@ -477,26 +668,36 @@ void build_profiles_list_json(char *buffer, size_t size) {
             // extract name without .config
             char name[256];
             strncpy(name, ent->d_name, sizeof(name));
+            name[sizeof(name)-1] = '\0';
             char *dot = strrchr(name, '.');
             if (dot) *dot = '\0';
             // read content
             char content[4096];
-            if (read_profile_file(name, content, sizeof(content)) == 0) {
+                if (read_profile_file(name, content, sizeof(content)) == 0) {
                 // escape content for JSON
-                char escaped[8192];
+                // Build a sanitized preview of the profile content (avoid embedding binary)
+                const size_t MAX_PREVIEW = 512;
+                char escaped[1024];
                 size_t ei = 0;
-                for (size_t i = 0; content[i] && ei < sizeof(escaped) - 10; i++) {
-                    if (content[i] == '"') {
-                        escaped[ei++] = '\\';
-                        escaped[ei++] = '"';
-                    } else if (content[i] == '\n') {
-                        escaped[ei++] = '\\';
-                        escaped[ei++] = 'n';
-                    } else if (content[i] == '\\') {
-                        escaped[ei++] = '\\';
-                        escaped[ei++] = '\\';
-                    } else {
-                        escaped[ei++] = content[i];
+                for (size_t i = 0; i < sizeof(content) && content[i] && ei < sizeof(escaped) - 10 && i < MAX_PREVIEW; i++) {
+                    unsigned char ch = (unsigned char)content[i];
+                    if (ch == '"') { escaped[ei++] = '\\'; escaped[ei++] = '"'; }
+                    else if (ch == '\n') { escaped[ei++] = '\\'; escaped[ei++] = 'n'; }
+                    else if (ch == '\r') { escaped[ei++] = '\\'; escaped[ei++] = 'r'; }
+                    else if (ch == '\t') { escaped[ei++] = '\\'; escaped[ei++] = 't'; }
+                    else if (ch == '\\') { escaped[ei++] = '\\'; escaped[ei++] = '\\'; }
+                    else if (ch >= 0x20 && ch < 0x7f) { escaped[ei++] = ch; }
+                    else {
+                        // Non-printable or high-bit char -> encode as \u00NN (4-digit unicode escape for compatibility)
+                        if (ei + 6 < sizeof(escaped) - 1) {
+                            unsigned int v = ch;
+                            escaped[ei++] = '\\'; escaped[ei++] = 'u';
+                            escaped[ei++] = '0'; escaped[ei++] = '0';
+                            unsigned char hi = (v >> 4) & 0xF;
+                            unsigned char lo = v & 0xF;
+                            escaped[ei++] = (hi < 10) ? ('0' + hi) : ('A' + hi - 10);
+                            escaped[ei++] = (lo < 10) ? ('0' + lo) : ('A' + lo - 10);
+                        }
                     }
                 }
                 escaped[ei] = '\0';
@@ -602,6 +803,20 @@ int delete_profile_file(const char *name) {
     return unlink(path);
 }
 
+// Write profile raw content, no interpretation of \n escapes
+int write_profile_file_raw(const char *name, const char *buf, size_t len) {
+    if (ensure_profile_dir() != 0) return -1;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.config", get_profile_dir(), name);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return -1;
+    size_t written = fwrite(buf, 1, len, fp);
+    fclose(fp);
+    if (written != len) return -1;
+    chmod(path, 0644);
+    return 0;
+}
+
 // Variants that operate on an explicit directory
 // (Removed) directory-specific profile read helper — using global `read_profile_file`.
 
@@ -615,7 +830,7 @@ const char *html_dashboard =
 "<html><head>"
 "<meta charset=\"utf-8\">"
 "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-"<title>CPU Throttle Monitor</title>"
+"<title>Burn2Cool Dashboard</title>"
 "<style>"
 "*, *:before, *:after { box-sizing: border-box; }"
 "body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:20px;background:#1a1a1a;color:#fff}"
@@ -643,7 +858,7 @@ const char *html_dashboard =
     "<link rel='stylesheet' href='styles.css'>"
     "</head><body>"
 "<div class='topbar'><a href='https://github.com/DiabloPower/burn2cool' target='_blank' rel='noopener'>GitHub</a><div class='version'>v" DAEMON_VERSION "</div></div>"
-"<h1>CPU Throttle Monitor</h1>"
+"<h1>Burn2Cool Dashboard</h1>"
 "<div class='card'>"
 "<h2>Current Status</h2>"
 "<div class='label'>Temperature</div>"
@@ -706,7 +921,8 @@ const char *html_dashboard =
 "  fetch('/api/settings/'+name,{method:'POST',body:JSON.stringify({value:parseInt(val)}),headers:{'Content-Type':'application/json'}}).then(()=>update());"
 "}"
 "function refreshProfiles(){"
-"  fetch('/api/profiles').then(r=>r.json()).then(list=>{"
+"  fetch('/api/profiles').then(r=>r.json()).then(obj=>{"
+"    const list = (obj && obj.profiles) ? obj.profiles : [];"
 "    const select = document.getElementById('profilesSelect');"
 "    const prev = select.value;"
 "    select.innerHTML = '';"
@@ -714,8 +930,8 @@ const char *html_dashboard =
 "      const opt = document.createElement('option'); opt.value=''; opt.textContent='(no profiles)'; select.appendChild(opt); return;"
 "    }"
 "    const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='(select a profile)'; select.appendChild(placeholder);"
-"    list.forEach(name=>{"
-"      const opt = document.createElement('option'); opt.value = name; opt.textContent = name; select.appendChild(opt);"
+"    list.forEach(p=>{"
+"      const opt = document.createElement('option'); opt.value = p.name; opt.textContent = p.name; select.appendChild(opt);"
 "    });"
 "    if(prev){ const found = Array.from(select.options).some(o=>o.value===prev); if(found) select.value = prev; }"
 "    select.onchange = function(){ if(this.value) loadProfileToEditor(this.value); };"
@@ -740,9 +956,9 @@ const char *html_dashboard =
 "  if(!name){ alert('Enter filename'); return; }"
 "  fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok){ console.log('Save successful'); showToast('Profile saved', 'success'); refreshProfiles(); } else { console.log('Save failed'); showToast('Save failed', 'error'); } }).catch(e=>{ console.log('Fetch error:', e); });"
 "}"
-"function deleteProfile(){"
+"async function deleteProfile(){"
 "  const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }"
-"  if(!confirm('Delete '+name+'?')) return;"
+"  if(!(typeof window.showConfirm === 'function' ? await window.showConfirm('Delete '+name+'?') : window.confirm('Delete '+name+'?'))) return;"
 "  fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ showToast('Profile deleted', 'success'); document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else { showToast('Delete failed', 'error'); } });"
 "}"
 "function loadProfile(){"
@@ -766,6 +982,8 @@ const char *main_js =
 "  const r = await fetch('/api'+path, opts);\n"
 "  return r.json();\n"
 "}\n\n"
+"// Provide global showConfirm fallback if not present (modal implementation on index.html will override)\n"
+"if (typeof window.showConfirm !== 'function') { window.showConfirm = function(msg){ return new Promise((resolve)=>{ resolve(window.confirm(msg)); }); } }\n\n"
 "let profilesCache = [];\n\n"
 "async function refresh(){\n"
 "  const data = await api('/profiles');\n"
@@ -812,7 +1030,7 @@ const char *main_js =
 "async function deleteProfile(){\n"
 "  const name = document.getElementById('pname').value.trim();\n"
 "  if(!name){ alert('Enter profile filename'); return; }\n"
-"  if(!confirm('Delete profile '+name+' ?')) return;\n"
+"  if(!(typeof window.showConfirm === 'function' ? await window.showConfirm('Delete profile '+name+' ?') : window.confirm('Delete profile '+name+' ?'))) return;\n"
 "  const r = await api('/profiles/'+encodeURIComponent(name), 'DELETE');\n"
 "  if(!r.ok) ;\n"
 "  else { document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; await refresh(); }\n"
@@ -942,6 +1160,10 @@ void handle_http_request(int client_fd, const char *request) {
         build_limits_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
     }
+    else if (strcmp(path, "/api/zones") == 0 && strcmp(method, "GET") == 0) {
+        build_zones_json(response, sizeof(response));
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
     else if (strcmp(path, "/api/daemon/version") == 0 && strcmp(method, "GET") == 0) {
         snprintf(response, sizeof(response), "{\"version\":\"%s\"}", DAEMON_VERSION);
         send_http_response(client_fd, "200 OK", "application/json", response);
@@ -949,6 +1171,12 @@ void handle_http_request(int client_fd, const char *request) {
     else if (strcmp(path, "/api/daemon/shutdown") == 0 && strcmp(method, "POST") == 0) {
         should_exit = 1;
         snprintf(response, sizeof(response), "{\"status\":\"shutting down\"}");
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
+    else if (strcmp(path, "/api/daemon/restart") == 0 && strcmp(method, "POST") == 0) {
+        should_restart = 1;
+        should_exit = 1; // exit loop; exec will be handled after cleanup
+        snprintf(response, sizeof(response), "{\"status\":\"restarting\"}");
         send_http_response(client_fd, "200 OK", "application/json", response);
     }
     else if (strncmp(path, "/api/profiles/", 14) == 0) {
@@ -1056,11 +1284,26 @@ void handle_http_request(int client_fd, const char *request) {
         }
     }
     else if (strcmp(path, "/api/profiles") == 0 && strcmp(method, "GET") == 0) {
-        char listbuf[4096];
-        build_profiles_list_json(listbuf, sizeof(listbuf));
-        char resp[8192];
-        snprintf(resp, sizeof(resp), "{\"ok\":true,\"profiles\":%s}", listbuf);
+        // Build profiles JSON into a dynamically-sized buffer to avoid truncation
+        size_t bufsize = 16384;
+        char *listbuf = malloc(bufsize);
+        if (!listbuf) {
+            send_http_response(client_fd, "500 Internal Server Error", "application/json", "{\"ok\":false,\"error\":\"malloc failed\"}");
+            return;
+        }
+        build_profiles_list_json(listbuf, bufsize);
+        // ensure response buffer large enough
+        size_t resp_size = strlen(listbuf) + 64;
+        char *resp = malloc(resp_size);
+        if (!resp) {
+            free(listbuf);
+            send_http_response(client_fd, "500 Internal Server Error", "application/json", "{\"ok\":false,\"error\":\"malloc failed\"}");
+            return;
+        }
+        snprintf(resp, resp_size, "{\"ok\":true,\"profiles\":%s}", listbuf);
         send_http_response(client_fd, "200 OK", "application/json", resp);
+        free(listbuf);
+        free(resp);
     }
     
     else if (strcmp(path, "/api/profiles") == 0 && strcmp(method, "POST") == 0) {
@@ -1103,8 +1346,9 @@ void handle_http_request(int client_fd, const char *request) {
                     char body[4096];
                     if (read_profile_file(pname, body, sizeof(body)) == 0) {
                         // apply key=values
-                        char tmp[4096];
-                        strncpy(tmp, body, sizeof(tmp)-1);
+                            char tmp[4096];
+                            strncpy(tmp, body, sizeof(tmp)-1);
+                            tmp[sizeof(tmp)-1] = '\0';
                         char *ln = strtok(tmp, "\n");
                         while (ln) {
                             char key[64], val[64];
@@ -1135,11 +1379,15 @@ void handle_http_request(int client_fd, const char *request) {
             }
         }
     }
+    else if (strcmp(path, "/api/settings/excluded-types") == 0 && strcmp(method, "GET") == 0) {
+        snprintf(response, sizeof(response), "{\"excluded_types\":\"%s\"}", excluded_types_config);
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
     else if (strncmp(path, "/api/settings/", 14) == 0 && strcmp(method, "POST") == 0) {
         // Extract setting name (safe-max, safe-min, temp-max)
         const char *setting = path + 14;
         
-        // Parse JSON body {\"value\":12345}
+        // Parse JSON body {\"value\":123}
         const char *body_start = strstr(request, "\r\n\r\n");
         if (body_start) {
             body_start += 4;
@@ -1148,19 +1396,76 @@ void handle_http_request(int client_fd, const char *request) {
             
             if (strcmp(setting, "safe-max") == 0) {
                 safe_max = value;
+                save_config_file();
                 snprintf(response, sizeof(response), "{\"status\":\"ok\",\"safe_max\":%d}", safe_max);
             }
             else if (strcmp(setting, "safe-min") == 0) {
                 safe_min = value;
+                save_config_file();
                 snprintf(response, sizeof(response), "{\"status\":\"ok\",\"safe_min\":%d}", safe_min);
             }
             else if (strcmp(setting, "temp-max") == 0) {
                 if (value >= 50 && value <= 110) {
                     temp_max = value;
+                    save_config_file();
                     snprintf(response, sizeof(response), "{\"status\":\"ok\",\"temp_max\":%d}", temp_max);
                 } else {
                     snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"temp_max must be 50-110\"}");
                 }
+            }
+            else if (strcmp(setting, "thermal-zone") == 0) {
+                if (value >= -1 && value <= 100) {  // -1 for auto, or zone number
+                    thermal_zone = value;
+                    // Re-detect temp_path if auto
+                    if (thermal_zone == -1) {
+                        int detected = detect_cpu_thermal_zone();
+                        thermal_zone = detected;
+                    }
+                    save_config_file();
+                    snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone%d/temp", thermal_zone);
+                    snprintf(response, sizeof(response), "{\"status\":\"ok\",\"thermal_zone\":%d}", thermal_zone);
+                } else {
+                    snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"thermal_zone must be -1 (auto) or 0-100\"}");
+                }
+            }
+            else if (strcmp(setting, "excluded-types") == 0) {
+                // parse a string value in JSON body {"value":"int3400,int3402"}
+                char valbuf[512] = {0};
+                const char *vpos = strstr(body_start, "\"value\"");
+                if (vpos) {
+                    // find opening quote for the value string
+                    const char *value_start = strchr(vpos, '"');
+                    if (value_start) {
+                        // get to the second quote after the key name
+                        value_start = strchr(value_start + 1, '"');
+                        if (value_start) {
+                            const char *first_val_quote = strchr(value_start + 1, '"');
+                            if (first_val_quote) {
+                                const char *end_val_quote = strchr(first_val_quote + 1, '"');
+                                if (end_val_quote) {
+                                    size_t len = end_val_quote - first_val_quote - 1;
+                                    if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                                    strncpy(valbuf, first_val_quote + 1, len);
+                                    valbuf[len] = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (valbuf[0]) {
+                    for (char *p = valbuf; *p; ++p) *p = tolower(*p);
+                    strncpy(excluded_types_config, valbuf, sizeof(excluded_types_config)-1);
+                    excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                    save_config_file();
+                    snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"%s\"}", excluded_types_config);
+                } else {
+                    snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"invalid excluded-types payload\"}");
+                }
+            }
+            else if (strcmp(setting, "use-avg-temp") == 0) {
+                use_avg_temp = value ? 1 : 0;
+                save_config_file();
+                snprintf(response, sizeof(response), "{\"status\":\"ok\",\"use_avg_temp\":%s}", use_avg_temp ? "true" : "false");
             }
             else {
                 snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"unknown setting\"}");
@@ -1207,8 +1512,31 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
             break;
         }
 
-        char buffer[256];
-        ssize_t n = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        char buffer[16384];
+        ssize_t n = 0;
+        size_t total = 0;
+        // Read until no more data (non-blocking) or EOF
+        int flags = fcntl(client_fd, F_GETFL, 0);
+        fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+        while (1) {
+            n = recv(client_fd, buffer + total, sizeof(buffer) - 1 - total, 0);
+            if (n > 0) {
+                total += n;
+                if (total >= sizeof(buffer) - 1) break;
+                continue;
+            }
+            if (n == 0) break; // EOF
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) { perror("recv"); break; }
+        }
+        fcntl(client_fd, F_SETFL, flags);
+        if (total > 0) {
+            buffer[total] = '\0';
+            n = (ssize_t)total;
+        } else {
+            buffer[0] = '\0'; n = 0;
+        }
         if (n > 0) {
             buffer[n] = '\0';
             LOG_INFO("Received command: '%s'\n", buffer);
@@ -1248,18 +1576,148 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                 if (strcmp(cmd, "set-safe-max") == 0 && sscanf(arg, "%d", &safe_max) == 1) {
                     if (safe_max > max_freq_limit) safe_max = max_freq_limit;
                     if (safe_max < min_freq) safe_max = 0;
+                    save_config_file();
                     snprintf(response, sizeof(response), "OK: safe_max set to %d kHz\n", safe_max);
                 }
                 else if (strcmp(cmd, "set-safe-min") == 0 && sscanf(arg, "%d", &safe_min) == 1) {
                     if (safe_min < min_freq) safe_min = min_freq;
                     if (safe_min > max_freq_limit) safe_min = max_freq_limit;
+                    save_config_file();
                     snprintf(response, sizeof(response), "OK: safe_min set to %d kHz\n", safe_min);
                 }
                 else if (strcmp(cmd, "set-temp-max") == 0 && sscanf(arg, "%d", &temp_max) == 1) {
                     if (temp_max < 50 || temp_max > 110) {
                         snprintf(response, sizeof(response), "ERROR: temp_max must be 50-110°C\n");
                     } else {
+                        save_config_file();
                         snprintf(response, sizeof(response), "OK: temp_max set to %d°C\n", temp_max);
+                    }
+                }
+                else if (strcmp(cmd, "set-thermal-zone") == 0 && sscanf(arg, "%d", &thermal_zone) == 1) {
+                    if (thermal_zone < -1 || thermal_zone > 100) {
+                        snprintf(response, sizeof(response), "ERROR: thermal_zone must be -1 (auto) or 0-100\n");
+                    } else {
+                        if (thermal_zone == -1) {
+                            int detected = detect_cpu_thermal_zone();
+                            thermal_zone = detected;
+                        }
+                        set_thermal_zone_path(thermal_zone);
+                        save_config_file();
+                        snprintf(response, sizeof(response), "OK: thermal_zone set to %d\n", thermal_zone);
+                    }
+                }
+                else if (strcmp(cmd, "set-use-avg-temp") == 0 && sscanf(arg, "%d", &use_avg_temp) == 1) {
+                    use_avg_temp = use_avg_temp ? 1 : 0;
+                    save_config_file();
+                    snprintf(response, sizeof(response), "OK: use_avg_temp set to %d\n", use_avg_temp);
+                }
+                else if (strcmp(cmd, "set-excluded-types") == 0) {
+                    if (arg && arg[0]) {
+                        // store lower-case list
+                        for (char *p = arg; *p; ++p) *p = tolower(*p);
+                        strncpy(excluded_types_config, arg, sizeof(excluded_types_config)-1);
+                        excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                        save_config_file();
+                        snprintf(response, sizeof(response), "OK: excluded types set to %s\n", excluded_types_config);
+                    } else {
+                        snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
+                    }
+                }
+                else if (strcmp(cmd, "version") == 0) {
+                    snprintf(response, sizeof(response), "{\"version\":\"%s\"}\n", DAEMON_VERSION);
+                }
+                else if (strcmp(cmd, "limits") == 0) {
+                    build_limits_json(response, sizeof(response));
+                }
+                else if (strcmp(cmd, "zones") == 0) {
+                    build_zones_json(response, sizeof(response));
+                }
+                else if (strcmp(cmd, "quit") == 0) {
+                    should_exit = 1;
+                    snprintf(response, sizeof(response), "OK: shutting down\n");
+                }
+                else if (strcmp(cmd, "restart") == 0) {
+                    should_restart = 1;
+                    should_exit = 1;
+                    snprintf(response, sizeof(response), "OK: restarting\n");
+                }
+                else if (strcmp(cmd, "get-profile") == 0) {
+                    char body[4096];
+                    if (read_profile_file(arg, body, sizeof(body)) == 0) {
+                        // send the raw profile content directly (may contain newlines)
+                        send(client_fd, body, strlen(body), 0);
+                        close(client_fd);
+                        continue; // skip sending the default response
+                    } else {
+                        snprintf(response, sizeof(response), "ERROR: not found\n");
+                    }
+                }
+                else if (strcmp(cmd, "write-profile-base64") == 0) {
+                    // arg has "<name> <base64>"
+                    char pname[256] = {0};
+                    char *space2 = strchr(arg, ' ');
+                    if (!space2) {
+                        snprintf(response, sizeof(response), "ERROR: missing arguments\n");
+                    } else {
+                        size_t namelen = (size_t)(space2 - arg);
+                        if (namelen >= sizeof(pname)) namelen = sizeof(pname)-1;
+                        memcpy(pname, arg, namelen);
+                        pname[namelen] = '\0';
+                        char *b64 = space2 + 1;
+                        unsigned char decoded[8192];
+                        size_t dlen = 0;
+                        base64_decode(b64, decoded, &dlen);
+                        LOG_VERBOSE("Decoded profile content (len=%zu): %s\n", dlen, decoded);
+                        if (dlen >= sizeof(decoded)) dlen = sizeof(decoded) - 1;
+                        decoded[dlen] = '\0';
+                        // Treat decoded as text
+                        if (ensure_profile_dir() == 0 && write_profile_file(pname, (const char*)decoded) == 0) {
+                            snprintf(response, sizeof(response), "OK: profile %s written\n", pname);
+                        } else {
+                            snprintf(response, sizeof(response), "ERROR: write failed\n");
+                        }
+                    }
+                }
+                else if (strcmp(cmd, "put-profile") == 0) {
+                    // Expect header: "put-profile <name> <len>\n" then raw bytes of length <len>
+                    char pname[256] = {0};
+                    size_t plen = 0;
+                    int hdr_len = 0;
+                    int parsed = sscanf(buffer, "%63s %255s %zu %n", cmd, pname, &plen, &hdr_len);
+                    if (parsed < 3) {
+                        snprintf(response, sizeof(response), "ERROR: invalid header\n");
+                    } else {
+                        // attempt to compute how many payload bytes were already read
+                        size_t body_start = (size_t)hdr_len;
+                        size_t have = total > body_start ? total - body_start : 0;
+                        // allocate buffer to hold full payload
+                        if (plen > 1024 * 1024 * 10) { // limit to 10MB
+                            snprintf(response, sizeof(response), "ERROR: payload too large\n");
+                        } else {
+                            char *payload = malloc(plen + 1);
+                            if (!payload) {
+                                snprintf(response, sizeof(response), "ERROR: malloc failed\n");
+                            } else {
+                                if (have > 0) memcpy(payload, buffer + body_start, have);
+                                // Read remaining bytes if any
+                                while (have < plen) {
+                                    ssize_t r = recv(client_fd, payload + have, plen - have, 0);
+                                    if (r <= 0) { break; }
+                                    have += (size_t)r;
+                                }
+                                if (have == plen) {
+                                    // write raw payload to profile
+                                    if (ensure_profile_dir() == 0 && write_profile_file_raw(pname, payload, plen) == 0) {
+                                        snprintf(response, sizeof(response), "OK: profile %s written\n", pname);
+                                    } else {
+                                        snprintf(response, sizeof(response), "ERROR: write failed\n");
+                                    }
+                                } else {
+                                    snprintf(response, sizeof(response), "ERROR: incomplete payload\n");
+                                }
+                                free(payload);
+                            }
+                        }
                     }
                 }
                 else if (strcmp(cmd, "status") == 0) {
@@ -1318,6 +1776,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         // apply key=values
                         char tmp[4096];
                         strncpy(tmp, body, sizeof(tmp)-1);
+                        tmp[sizeof(tmp)-1] = '\0';
                         char *ln = strtok(tmp, "\n");
                         while (ln) {
                             char key[64], val[64];
@@ -1358,12 +1817,12 @@ int read_avg_cpu_temp() {
             if (fp) {
                 char type[256];
                 if (fgets(type, sizeof(type), fp)) {
-                    type[strcspn(type, "\n")] = 0;
+                        type[strcspn(type, "\n")] = 0;
                     char lower_type[256];
                     strcpy(lower_type, type);
                     for (char *p = lower_type; *p; ++p) *p = tolower(*p);
-                    if (strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
-                        strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg")) {
+                        if (strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
+                            strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg")) {
                         char temp_path_zone[512];
                         snprintf(temp_path_zone, sizeof(temp_path_zone), "/sys/class/thermal/%s/temp", entry->d_name);
                         FILE *temp_fp = fopen(temp_path_zone, "r");
@@ -1372,6 +1831,11 @@ int read_avg_cpu_temp() {
                             if (fscanf(temp_fp, "%d", &temp_raw) == 1) {
                                 int temp_c = temp_raw / 1000;
                                 if (temp_c > 0 && temp_c < 150) {
+                                    // Skip excluded policy/dummy devices from avg calculation
+                                    if (is_excluded_thermal_type(lower_type)) {
+                                        fclose(temp_fp);
+                                        continue;
+                                    }
                                     total_temp += temp_c;
                                     count++;
                                 }
@@ -1386,7 +1850,10 @@ int read_avg_cpu_temp() {
     }
     closedir(dir);
     if (count == 0) return -1;
-    return total_temp / count;
+    int avg = total_temp / count;
+    // Apply offset for avg_temp to reduce throttling frequency
+    if (use_avg_temp) avg -= 5;
+    return avg;
 }
 
 int detect_cpu_thermal_zone() {
@@ -1396,8 +1863,9 @@ int detect_cpu_thermal_zone() {
         return 0;
     }
     struct dirent *entry;
-    int best_zone = -1;
+    int best_zone = 0; // Default to zone 0
     int max_temp = -1;
+    int zone0_temp = -1;
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, "thermal_zone", 12) == 0) {
             int zone_num = atoi(entry->d_name + 12);
@@ -1407,30 +1875,29 @@ int detect_cpu_thermal_zone() {
             if (fp) {
                 char type[256];
                 if (fgets(type, sizeof(type), fp)) {
-                    type[strcspn(type, "\n")] = 0; // remove newline
-                    // Check for CPU-related types (case-insensitive)
+                    type[strcspn(type, "\n")] = 0;
                     char lower_type[256];
                     strcpy(lower_type, type);
                     for (char *p = lower_type; *p; ++p) *p = tolower(*p);
-                    if (strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
-                        strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg")) {
-                        // Read temp to validate
-                        char temp_path_test[512];
-                        snprintf(temp_path_test, sizeof(temp_path_test), "/sys/class/thermal/%s/temp", entry->d_name);
-                        FILE *temp_fp = fopen(temp_path_test, "r");
-                        if (temp_fp) {
-                            int temp_raw;
-                            if (fscanf(temp_fp, "%d", &temp_raw) == 1) {
-                                int temp_c = temp_raw / 1000;
-                                if (temp_c > 0 && temp_c < 150) { // plausible range
-                                    if (temp_c > max_temp) {
-                                        max_temp = temp_c;
-                                        best_zone = zone_num;
-                                    }
+                    int is_cpu = strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
+                                 strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg");
+                    // Read temp
+                    char temp_path_test[512];
+                    snprintf(temp_path_test, sizeof(temp_path_test), "/sys/class/thermal/%s/temp", entry->d_name);
+                    FILE *temp_fp = fopen(temp_path_test, "r");
+                    if (temp_fp) {
+                        int temp_raw;
+                        if (fscanf(temp_fp, "%d", &temp_raw) == 1) {
+                            int temp_c = temp_raw / 1000;
+                            if (temp_c > 0 && temp_c < 150) {
+                                if (zone_num == 0) zone0_temp = temp_c;
+                                if (is_cpu && temp_c > max_temp) {
+                                    max_temp = temp_c;
+                                    best_zone = zone_num;
                                 }
                             }
-                            fclose(temp_fp);
                         }
+                        fclose(temp_fp);
                     }
                 }
                 fclose(fp);
@@ -1438,8 +1905,9 @@ int detect_cpu_thermal_zone() {
         }
     }
     closedir(dir);
-    if (best_zone == -1) {
-        LOG_VERBOSE("No suitable CPU thermal zone found, using default zone 0\n");
+    // If no CPU zone found or zone 0 has reasonable temp, prefer zone 0
+    if (best_zone == 0 || (zone0_temp > 0 && zone0_temp < 100)) {
+        LOG_VERBOSE("Using thermal zone 0 (temp: %d°C)\n", zone0_temp);
         return 0;
     }
     LOG_VERBOSE("Auto-detected CPU thermal zone %d (temp: %d°C)\n", best_zone, max_temp);
@@ -1458,7 +1926,7 @@ void print_help(const char *name) {
     printf("  --log <path>         Append log messages to a file\n");
     printf("  --sensor <path>      Manually specify temp sensor file\n");
     printf("  --thermal-zone <num> Manually specify thermal zone number (0,1,2,...)\n");
-    printf("  --avg-temp           Use average temperature from all CPU thermal zones\n");
+    printf("  --avg-temp           Use average temperature from CPU thermal zones\n");
     printf("  --safe-min <freq>    Optional safe minimum frequency in kHz (e.g. 2000000)\n");
     printf("  --safe-max <freq>    Optional safe maximum frequency in kHz (e.g. 3000000)\n");
     printf("  --temp-max <temp>    Maximum temperature threshold in °C (default 95)\n");
@@ -1475,6 +1943,7 @@ void print_help(const char *name) {
 }
 
 int main(int argc, char *argv[]) {
+    saved_argv = argv; // keep argv for potential execv on restart
     // Load config file first (CLI args will override)
     load_config_file();
     log_level = LOGLEVEL_VERBOSE; // Override config for debugging
@@ -1490,6 +1959,7 @@ int main(int argc, char *argv[]) {
             }
         } else if (strcmp(argv[i], "--sensor") == 0 && i + 1 < argc) {
             strncpy(temp_path, argv[++i], sizeof(temp_path) - 1);
+            temp_path[sizeof(temp_path)-1] = '\0';
             temp_path[sizeof(temp_path) - 1] = '\0';
         } else if (strcmp(argv[i], "--thermal-zone") == 0 && i + 1 < argc) {
             thermal_zone = atoi(argv[++i]);
@@ -1650,16 +2120,30 @@ int main(int argc, char *argv[]) {
             }
             current_temp = temp;
 
-            int thresh_light = temp_max * 79 / 100;
-            int thresh_medium = temp_max * 86 / 100;
-            int thresh_strong = temp_max * 93 / 100;
             int new_freq = max_freq;
+            int throttle_start = temp_max - 30; // Start throttling 30°C below temp_max for gentler curve
+            int hysteresis = 3; // °C hysteresis to prevent oscillations
 
-            if (temp >= temp_max) new_freq = min_freq;
-            else if (temp >= thresh_strong) new_freq = min_freq + (max_freq - min_freq) * 40 / 100;
-            else if (temp >= thresh_medium) new_freq = min_freq + (max_freq - min_freq) * 65 / 100;
-            else if (temp >= thresh_light) new_freq = min_freq + (max_freq - min_freq) * 85 / 100;
-            else new_freq = max_freq;
+            // Calculate target frequency
+            int target_freq = max_freq;
+            if (temp >= temp_max) {
+                target_freq = safe_min > 0 ? safe_min : min_freq; // Don't go below safe_min
+            } else if (temp >= throttle_start) {
+                // Linear scaling from max_freq at throttle_start to 50% of max_freq at temp_max
+                int temp_range = temp_max - throttle_start;
+                int freq_range = max_freq / 2; // Scale down to 50% max_freq, not to min_freq
+                int temp_above_start = temp - throttle_start;
+                target_freq = max_freq - (freq_range * temp_above_start) / temp_range;
+                if (target_freq < safe_min && safe_min > 0) target_freq = safe_min;
+            }
+
+            // Apply hysteresis: only change if temp deviates significantly from last throttle point
+            if (abs(temp - last_throttle_temp) >= hysteresis || last_throttle_temp == 0) {
+                new_freq = target_freq;
+                last_throttle_temp = temp;
+            } else {
+                new_freq = current_freq; // keep current frequency
+            }
 
             if (safe_min > 0 && temp < temp_max && new_freq < safe_min) new_freq = safe_min;
 
@@ -1680,6 +2164,15 @@ int main(int argc, char *argv[]) {
 
     cleanup_socket();
     if (logfile) fclose(logfile);
+    if (should_restart) {
+        LOG_INFO("Restarting daemon...\n");
+        // Re-exec the same binary with original arguments if available
+        if (saved_argv) {
+            execv(saved_argv[0], saved_argv);
+            perror("execv");
+        }
+        return 1;
+    }
     LOG_INFO("Shutting down gracefully...\n");
     return 0;
 }
