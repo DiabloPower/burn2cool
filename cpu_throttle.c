@@ -1654,16 +1654,18 @@ int main(int argc, char *argv[]) {
             }
             current_temp = temp;
 
-            int thresh_light = temp_max * 79 / 100;
-            int thresh_medium = temp_max * 86 / 100;
-            int thresh_strong = temp_max * 93 / 100;
             int new_freq = max_freq;
+            int throttle_start = temp_max - 20; // Start throttling 20°C below temp_max
 
-            if (temp >= temp_max) new_freq = min_freq;
-            else if (temp >= thresh_strong) new_freq = min_freq + (max_freq - min_freq) * 40 / 100;
-            else if (temp >= thresh_medium) new_freq = min_freq + (max_freq - min_freq) * 65 / 100;
-            else if (temp >= thresh_light) new_freq = min_freq + (max_freq - min_freq) * 85 / 100;
-            else new_freq = max_freq;
+            if (temp >= temp_max) {
+                new_freq = min_freq;
+            } else if (temp >= throttle_start) {
+                // Linear scaling from max_freq at throttle_start to min_freq at temp_max
+                int temp_range = temp_max - throttle_start;
+                int freq_range = max_freq - min_freq;
+                int temp_above_start = temp - throttle_start;
+                new_freq = max_freq - (freq_range * temp_above_start) / temp_range;
+            }
 
             if (safe_min > 0 && temp < temp_max && new_freq < safe_min) new_freq = safe_min;
 
