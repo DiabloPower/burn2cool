@@ -44,6 +44,7 @@ int web_port = 0; // HTTP port (0 = disabled, DEFAULT_WEB_PORT = 8086 when enabl
 int log_level = LOGLEVEL_NORMAL; // default logging level
 volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
 int thermal_zone = -1; // thermal zone number (-1 = auto-detect)
+int use_avg_temp = 0; // use average temperature from all CPU zones
 
 // Current state for API responses
 int current_temp = 0;
@@ -155,6 +156,9 @@ void load_config_file() {
             } else if (strcmp(key, "thermal_zone") == 0) {
                 thermal_zone = atoi(value);
                 LOG_VERBOSE("Config: thermal_zone = %d\n", thermal_zone);
+            } else if (strcmp(key, "avg_temp") == 0) {
+                use_avg_temp = atoi(value);
+                LOG_VERBOSE("Config: avg_temp = %d\n", use_avg_temp);
             } else if (strcmp(key, "web_port") == 0) {
                 web_port = atoi(value);
                 LOG_VERBOSE("Config: web_port = %d\n", web_port);
@@ -167,6 +171,9 @@ void load_config_file() {
 }
 
 int read_temp() {
+    if (use_avg_temp) {
+        return read_avg_cpu_temp();
+    }
     FILE *fp = fopen(temp_path, "r");
     if (!fp) return -1;
     int temp_raw;
@@ -1337,6 +1344,51 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
     }
 }
 
+int read_avg_cpu_temp() {
+    DIR *dir = opendir("/sys/class/thermal");
+    if (!dir) return -1;
+    struct dirent *entry;
+    int total_temp = 0;
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "thermal_zone", 12) == 0) {
+            char type_path[512];
+            snprintf(type_path, sizeof(type_path), "/sys/class/thermal/%s/type", entry->d_name);
+            FILE *fp = fopen(type_path, "r");
+            if (fp) {
+                char type[256];
+                if (fgets(type, sizeof(type), fp)) {
+                    type[strcspn(type, "\n")] = 0;
+                    char lower_type[256];
+                    strcpy(lower_type, type);
+                    for (char *p = lower_type; *p; ++p) *p = tolower(*p);
+                    if (strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
+                        strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg")) {
+                        char temp_path_zone[512];
+                        snprintf(temp_path_zone, sizeof(temp_path_zone), "/sys/class/thermal/%s/temp", entry->d_name);
+                        FILE *temp_fp = fopen(temp_path_zone, "r");
+                        if (temp_fp) {
+                            int temp_raw;
+                            if (fscanf(temp_fp, "%d", &temp_raw) == 1) {
+                                int temp_c = temp_raw / 1000;
+                                if (temp_c > 0 && temp_c < 150) {
+                                    total_temp += temp_c;
+                                    count++;
+                                }
+                            }
+                            fclose(temp_fp);
+                        }
+                    }
+                }
+                fclose(fp);
+            }
+        }
+    }
+    closedir(dir);
+    if (count == 0) return -1;
+    return total_temp / count;
+}
+
 int detect_cpu_thermal_zone() {
     DIR *dir = opendir("/sys/class/thermal");
     if (!dir) {
@@ -1406,6 +1458,7 @@ void print_help(const char *name) {
     printf("  --log <path>         Append log messages to a file\n");
     printf("  --sensor <path>      Manually specify temp sensor file\n");
     printf("  --thermal-zone <num> Manually specify thermal zone number (0,1,2,...)\n");
+    printf("  --avg-temp           Use average temperature from all CPU thermal zones\n");
     printf("  --safe-min <freq>    Optional safe minimum frequency in kHz (e.g. 2000000)\n");
     printf("  --safe-max <freq>    Optional safe maximum frequency in kHz (e.g. 3000000)\n");
     printf("  --temp-max <temp>    Maximum temperature threshold in °C (default 95)\n");
@@ -1415,7 +1468,7 @@ void print_help(const char *name) {
     printf("  --silent             Silent mode (no output)\n");
     printf("  --help               Show this help message\n");
     printf("\nConfig file: %s (optional)\n", CONFIG_FILE);
-    printf("Supported keys: temp_max, safe_min, safe_max, sensor, thermal_zone, web_port\n");
+    printf("Supported keys: temp_max, safe_min, safe_max, sensor, thermal_zone, avg_temp, web_port\n");
     printf("\nWeb Interface:\n");
     printf("  Use --web-port (without argument) for default port %d\n", DEFAULT_WEB_PORT);
     printf("  Use --web-port <port> for custom port (1024-65535)\n");
@@ -1440,6 +1493,8 @@ int main(int argc, char *argv[]) {
             temp_path[sizeof(temp_path) - 1] = '\0';
         } else if (strcmp(argv[i], "--thermal-zone") == 0 && i + 1 < argc) {
             thermal_zone = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--avg-temp") == 0) {
+            use_avg_temp = 1;
         } else if (strcmp(argv[i], "--safe-min") == 0 && i + 1 < argc) {
             safe_min = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--safe-max") == 0 && i + 1 < argc) {
