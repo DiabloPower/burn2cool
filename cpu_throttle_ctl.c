@@ -49,13 +49,13 @@ void print_help(const char *name) {
     printf("\nProfile commands:\n");
     printf("  save-profile <name>    Save current settings to a profile\n");
     printf("  load-profile <name>    Load settings from a profile\n");
-    printf("  list-profiles          List all saved profiles\n");
+    printf("  list-profiles          List all saved profiles (accepts --json/-j)\n");
     printf("  delete-profile <name>  Delete a profile\n");
     printf("  get-profile <name>     Print profile contents\n");
     printf("  put-profile <name> <file>  Upload profile contents from a file\n");
     printf("  version                Print daemon version\n");
-    printf("  limits                 Print CPU min/max limits\n");
-    printf("  zones                  Print thermal zones\n");
+    printf("  limits                 Print CPU min/max limits (accepts --json/-j)\n");
+    printf("  zones                  Print thermal zones (accepts --json/-j)\n");
     printf("  restart                Restart the daemon (if running)\n");
     printf("  start                  Start the daemon (systemctl or background)\n");
     printf("\nSkin commands:\n");
@@ -372,6 +372,12 @@ int main(int argc, char *argv[]) {
         load_profile(argv[2]);
         return 0;
     } else if (strcmp(argv[1], "list-profiles") == 0) {
+        // Optional --json/-j to return JSON via socket
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            char *resp = send_command_get_response("list-profiles json");
+            if (!resp) { fprintf(stderr, "Error: failed to query profiles\n"); return 1; }
+            printf("%s\n", resp); free(resp); return 0;
+        }
         list_profiles();
         return 0;
     } else if (strcmp(argv[1], "delete-profile") == 0) {
@@ -532,6 +538,26 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Unknown skins subcommand '%s'\n", argv[2]);
             return 1;
         }
+    }
+
+    // status/limits/zones commands: support optional --json/-j or --pretty/-p
+    if (strcmp(argv[1], "status") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            char *resp = send_command_get_response("status json"); if (!resp) { fprintf(stderr, "Error: failed to query status\n"); return 1; } printf("%s", resp); free(resp); return 0;
+        }
+        return send_command("status");
+    }
+    if (strcmp(argv[1], "limits") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            char *resp = send_command_get_response("limits json"); if (!resp) { fprintf(stderr, "Error: failed to query limits\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("limits");
+    }
+    if (strcmp(argv[1], "zones") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("zones");
     }
 
     // Build command string for daemon
