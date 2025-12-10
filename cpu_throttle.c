@@ -69,11 +69,20 @@ int cpu_min_freq = 0;
 int cpu_max_freq = 0;
 char **saved_argv = NULL;
 
-/* Optional generated asset headers. Run `make assets` to generate headers in
- * `include/` and this file `include/assets_generated.h` will define
- * `USE_ASSET_HEADERS` so the server will prefer the generated binary arrays.
- */
-#include "include/assets_generated.h"
+#if defined(__has_include)
+    #if __has_include("include/assets_generated.h")
+        /* Optional generated asset headers. Run `make assets` to generate headers in
+         * `include/` and this file `include/assets_generated.h` will define
+         * `USE_ASSET_HEADERS` so the server will prefer the generated binary arrays.
+         */
+        #include "include/assets_generated.h"
+    #endif
+#else
+    /* Fallback for compilers without __has_include: still try to include the header
+     * if present. The build will fail if the header is missing when the Makefile
+     * expects it. */
+    #include "include/assets_generated.h"
+#endif
 #ifdef USE_ASSET_HEADERS
 #include "include/index_html.h"   /* defines assets_index_html and assets_index_html_len */
 #include "include/main_js.h"      /* defines assets_main_js and assets_main_js_len */
@@ -90,11 +99,13 @@ char **saved_argv = NULL;
 #define ASSET_INDEX_HTML_LEN assets_index_html_len
 #endif
 
-/* Assets directory: default path to serve static assets when not compiled-in */
+#else /* !USE_ASSET_HEADERS */
+/* Assets directory: default path to serve static assets. */
 const char *ASSETS_DIR = "assets";
 
-/* Helper: read a file from disk and return its content (dynamically allocated).
- * Caller must free() the returned buffer. Returns NULL on failure. */
+/* Helper: when compiled without asset headers, read a file from disk and
+ * return its content (dynamically allocated). Caller must free() the
+ * returned buffer. Returns NULL on failure. */
 static char *read_file_alloc(const char *path, size_t *out_len) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
@@ -120,21 +131,27 @@ static const char *guess_mime(const char *path){
     return "application/octet-stream";
 }
 
-/* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served, 0 if not found, -1 on error */
+/* forward declaration for send_http_response_len to avoid implicit declaration
+ * when file-serving helper is compiled earlier than the response function. */
+void send_http_response_len(int client_fd, const char *status, const char *content_type, const void *body, size_t len, const char *extra_headers);
+
+/* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served,
+ * 0 if not found, -1 on error. Only compiled when USE_ASSET_HEADERS is not
+ * defined (i.e. when we don't have embedded headers). */
 static int serve_asset_from_disk(int client_fd, const char *relpath) {
     char path[1024];
     snprintf(path, sizeof(path), "%s%s", ASSETS_DIR, relpath);
     size_t len; char *buf = read_file_alloc(path, &len);
     if (!buf) return 0; /* not found or could not read */
     const char *mime = guess_mime(relpath);
-    if (strncmp(mime, "image/", 6) == 0 || strcmp(mime, "application/octet-stream") == 0) {
-        send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
-    } else {
-        send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
-    }
+    /* We simply forward bytes as the body (no chunking). The same function
+     * handles blobs (image/ and others) and text. Ensure send_http_response_len
+     * is declared prior to this call. */
+    send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
     free(buf);
     return 1;
 }
+#endif /* USE_ASSET_HEADERS */
 #ifndef ASSET_MAIN_JS
 #define ASSET_MAIN_JS assets_main_js
 #define ASSET_MAIN_JS_LEN assets_main_js_len
@@ -146,7 +163,6 @@ static int serve_asset_from_disk(int client_fd, const char *relpath) {
 #ifndef ASSET_FAVICON
 #define ASSET_FAVICON assets_favicon_ico
 #define ASSET_FAVICON_LEN assets_favicon_ico_len
-#endif
 #endif
 
 // Logging macros (use __VA_ARGS__ form to satisfy pedantic compilers)
@@ -768,7 +784,7 @@ void build_profiles_list_json(char *buffer, size_t size) {
     closedir(d);
 }
 
-// (Removed) directory-specific profile listing helper — web UI uses global profiles only now.
+// Profile listing is global-only; per-directory listing omitted.
 
 // URL decode helper functions
 int hex_to_int(char c) {
@@ -863,12 +879,7 @@ int write_profile_file_raw(const char *name, const char *buf, size_t len) {
     return 0;
 }
 
-// Variants that operate on an explicit directory
-// (Removed) directory-specific profile read helper — using global `read_profile_file`.
-
-// (Removed) directory-specific profile write helper — using global `write_profile_file`.
-
-// (Removed) directory-specific profile delete helper — using global `delete_profile_file`.
+// Per-directory profile helpers removed; the server uses global profile I/O helpers.
 
 // Embedded dashboard: removed to avoid duplicate runtime/data (use generated headers or assets/)
 // HTML/JS/CSS fallbacks removed; use generated headers or serve assets from disk instead.
@@ -894,13 +905,13 @@ static int extract_json_string(const char *body, const char *key, char *out, siz
     return 0;
 }
 
-// (Removed) helper: format IPv4 address into /proc/net/tcp hex — not used anymore.
+// IPv4 -> /proc/net/tcp helper removed (unused).
 
-// (Removed) per-connection UID lookup — web UI is global-only now.
+// Per-connection UID lookup removed; web UI operates globally.
 
-// (Removed) per-connection UID lookup helper — not used for global-only web UI.
+// Per-connection UID lookup helper removed (unused).
 
-// (Removed) per-client profile dir resolver — web UI uses global profile dir.
+// Per-client profile dir resolver removed; global profile dir is used.
 
 // Parse HTTP request and route to handlers
 void handle_http_request(int client_fd, const char *request) {

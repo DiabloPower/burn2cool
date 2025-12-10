@@ -26,7 +26,7 @@ static volatile int keep_running = 1;
 static volatile int help_visible = 0;
 static int help_offset = 0;
 // history for sparkline
-/* history removed (sparklines disabled) */
+/* history/sparkline output disabled */
 // profile filter
 static char profile_filter[128] = "";
 
@@ -147,7 +147,7 @@ static int prompt_char(WINDOW *inputwin, const char *prompt) {
 
 // spawn a system command in background and store result in last_msg
 struct sys_arg { char cmd[512]; };
-/* removed spawn_system_async/worker_system helper (unused) */
+/* spawn_system_async/worker_system helper removed (unused) */
 
 // Try to start daemon: prefer systemctl (user or system), else try command in PATH, else return failure message
 static void *worker_start_daemon(void *v) {
@@ -530,7 +530,7 @@ static void *poller_thread(void *v) {
             status_buf[sizeof(status_buf)-1] = '\0';
             free(r);
             status_ts = time(NULL);
-            /* sparkline parsing removed */
+            /* sparkline parsing intentionally omitted */
         } else {
             strncpy(status_buf, "(daemon unreachable)", sizeof(status_buf)-1);
             status_buf[sizeof(status_buf)-1] = '\0';
@@ -541,7 +541,7 @@ static void *poller_thread(void *v) {
     return NULL;
 }
 
-/* sparklines removed */
+/* sparklines disabled */
 
 // Load profile: send load-profile command to daemon
 int load_profile_by_name(const char *name) {
