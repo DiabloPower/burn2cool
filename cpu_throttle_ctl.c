@@ -393,12 +393,19 @@ int main(int argc, char *argv[]) {
     // Skin commands
     if (strcmp(argv[1], "skins") == 0) {
                 if (strcmp(argv[2], "install") == 0) {
+                    // usage: cpu_throttle_ctl skins install <archive> [--activate|-a]
+                    int activate_after = 0;
                     if (argc < 4) {
                         fprintf(stderr, "Error: archive path required for 'skins install'\n");
                         return 1;
                     }
+                    // optional activate flag as argv[4]
+                    const char *archive_path = argv[3];
+                    if (argc >= 5) {
+                        if (strcmp(argv[4], "--activate") == 0 || strcmp(argv[4], "-a") == 0) activate_after = 1;
+                    }
                     // open file and send via put-skin
-                    FILE *fp = fopen(argv[3], "rb");
+                    FILE *fp = fopen(archive_path, "rb");
                     if (!fp) { fprintf(stderr, "Error: cannot open file %s\n", argv[3]); return 1; }
                     fseek(fp, 0, SEEK_END); long fsize = ftell(fp); fseek(fp, 0, SEEK_SET);
                     if (fsize <= 0) { fprintf(stderr, "Error: empty file\n"); fclose(fp); return 1; }
@@ -419,6 +426,26 @@ int main(int argc, char *argv[]) {
                     fclose(fp);
                     char resp[1024]; ssize_t n = recv(sock_fd, resp, sizeof(resp)-1, 0); if (n > 0) { resp[n]='\0'; printf("%s", resp); }
                     close(sock_fd);
+                    // If requested, attempt to activate installed skin by parsing returned id
+                    if (activate_after) {
+                        const char *marker = "installed ";
+                        char id[256] = {0};
+                        const char *p = strstr(resp, marker);
+                        if (p) {
+                            p += strlen(marker);
+                            size_t i = 0;
+                            while (*p && *p != '\n' && *p != '\r' && *p != ' ' && i + 1 < sizeof(id)) id[i++] = *p++;
+                            id[i] = '\0';
+                            if (i > 0) {
+                                char cmd[512]; snprintf(cmd, sizeof(cmd), "activate-skin %s", id);
+                                send_command(cmd);
+                            } else {
+                                fprintf(stderr, "Warning: could not parse installed id for activation\n");
+                            }
+                        } else {
+                            fprintf(stderr, "Warning: server did not report installed id, cannot activate\n");
+                        }
+                    }
                     return 0;
                 }
         if (argc < 3) {
@@ -426,6 +453,14 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (strcmp(argv[2], "list") == 0) {
+            // Optional 'json' argument to request JSON output
+            if (argc >= 4 && strcmp(argv[3], "json") == 0) {
+                char *resp = send_command_get_response("list-skins json");
+                if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
+                printf("%s", resp);
+                free(resp);
+                return 0;
+            }
             return send_command("list-skins");
         }
         else if (strcmp(argv[2], "activate") == 0) {
