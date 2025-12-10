@@ -5,7 +5,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <pwd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -67,6 +69,8 @@ void ensure_profile_dir() {
     char *dir = get_profile_dir();
     // Create ~/.config if needed
     char config_dir[512];
+// Send a command and return the response string (malloc'ed, caller frees).
+
     const char *home = getenv("HOME");
     if (!home) {
         struct passwd *pw = getpwuid(getuid());
@@ -81,6 +85,20 @@ void ensure_profile_dir() {
     
     // Create profiles directory
     mkdir(dir, 0755);
+}
+
+// send_all: ensure all bytes are written to a socket, handle EINTR and EAGAIN.
+static int send_all(int sock_fd, const void *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t r = send(sock_fd, (const char*)buf + sent, len - sent, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1; // caller will perror
+        }
+        sent += (size_t)r;
+    }
+    return 0;
 }
 
 void print_help(const char *name) {
@@ -125,6 +143,8 @@ void print_help(const char *name) {
 }
 
 int send_command(const char *cmd) {
+    // Ensure SIGPIPE doesn't crash the CLI if the daemon closes the socket
+    signal(SIGPIPE, SIG_IGN);
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("socket");
@@ -146,11 +166,7 @@ int send_command(const char *cmd) {
     printf("Connected to socket\n");
 
     char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
-    if (send(sock_fd, cmd_nl, strlen(cmd_nl), 0) < 0) {
-        perror("send");
-        close(sock_fd);
-        return -1;
-    }
+    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) { perror("send"); close(sock_fd); return -1; }
 
     printf("Sent command: %s\n", cmd);
 
@@ -180,7 +196,7 @@ char *send_command_get_response(const char *cmd) {
     memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock_fd); return NULL; }
     char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
-    if (send(sock_fd, cmd_nl, strlen(cmd_nl), 0) < 0) { close(sock_fd); return NULL; }
+    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) { close(sock_fd); return NULL; }
     // Read up to some reasonable max (e.g., 32KB)
     size_t cap = 32768; char *buf = malloc(cap);
     if (!buf) { close(sock_fd); return NULL; }
@@ -227,7 +243,7 @@ void save_profile(const char *profile_name) {
         return;
     }
 
-    send(sock_fd, "status", 6, 0);
+    if (send_all(sock_fd, "status", 6) != 0) { perror("send"); close(sock_fd); return; }
     char response[512];
     ssize_t n = recv(sock_fd, response, sizeof(response) - 1, 0);
     close(sock_fd);
@@ -294,7 +310,7 @@ void list_profiles() {
         return;
     }
 
-    if (send(sock_fd, "list-profiles", 13, 0) < 0) {
+    if (send_all(sock_fd, "list-profiles", 13) < 0) {
         perror("send");
         close(sock_fd);
         return;
@@ -394,6 +410,8 @@ void put_profile(const char *profile_name, const char *file_path) {
 }
 
 int main(int argc, char *argv[]) {
+    // avoid being killed by SIGPIPE when send() on a closed socket
+    signal(SIGPIPE, SIG_IGN);
     if (argc < 2) {
         print_help(argv[0]);
         return 1;
