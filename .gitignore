@@ -45,3 +45,10 @@ __pycache__/
 # Optional: generated C headers for embedded assets are often committed intentionally.
 # If you prefer NOT to commit generated headers, uncomment the next line to ignore them:
 include/*.h
+
+# Ignore generated asset headers (if you prefer the project to use runtime assets or generated headers via make assets)
+include/index_html.h
+include/main_js.h
+include/styles_css.h
+include/favicon_ico.h
+include/assets_generated.h

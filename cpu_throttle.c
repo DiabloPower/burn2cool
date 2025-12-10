@@ -89,6 +89,52 @@ char **saved_argv = NULL;
 #define ASSET_INDEX_HTML assets_index_html
 #define ASSET_INDEX_HTML_LEN assets_index_html_len
 #endif
+
+/* Assets directory: default path to serve static assets when not compiled-in */
+const char *ASSETS_DIR = "assets";
+
+/* Helper: read a file from disk and return its content (dynamically allocated).
+ * Caller must free() the returned buffer. Returns NULL on failure. */
+static char *read_file_alloc(const char *path, size_t *out_len) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long len = ftell(fp);
+    if (len < 0) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = malloc(len + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t r = fread(buf, 1, len, fp);
+    fclose(fp);
+    buf[r] = '\0';
+    if (out_len) *out_len = r;
+    return buf;
+}
+
+static const char *guess_mime(const char *path){
+    size_t l = strlen(path);
+    if (l >= 5 && strcmp(path + l - 5, ".html") == 0) return "text/html";
+    if (l >= 4 && strcmp(path + l - 4, ".css") == 0) return "text/css";
+    if (l >= 3 && strcmp(path + l - 3, ".js") == 0) return "application/javascript";
+    if (l >= 4 && strcmp(path + l - 4, ".ico") == 0) return "image/x-icon";
+    return "application/octet-stream";
+}
+
+/* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served, 0 if not found, -1 on error */
+static int serve_asset_from_disk(int client_fd, const char *relpath) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s%s", ASSETS_DIR, relpath);
+    size_t len; char *buf = read_file_alloc(path, &len);
+    if (!buf) return 0; /* not found or could not read */
+    const char *mime = guess_mime(relpath);
+    if (strncmp(mime, "image/", 6) == 0 || strcmp(mime, "application/octet-stream") == 0) {
+        send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
+    } else {
+        send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
+    }
+    free(buf);
+    return 1;
+}
 #ifndef ASSET_MAIN_JS
 #define ASSET_MAIN_JS assets_main_js
 #define ASSET_MAIN_JS_LEN assets_main_js_len
@@ -824,260 +870,8 @@ int write_profile_file_raw(const char *name, const char *buf, size_t len) {
 
 // (Removed) directory-specific profile delete helper — using global `delete_profile_file`.
 
-// Embedded dashboard: keep the original final visual design and add profile controls
-const char *html_dashboard =
-"<!DOCTYPE html>"
-"<html><head>"
-"<meta charset=\"utf-8\">"
-"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-"<title>Burn2Cool Dashboard</title>"
-"<style>"
-"*, *:before, *:after { box-sizing: border-box; }"
-"body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:20px;background:#1a1a1a;color:#fff}"
-"h1{color:#FF8C00}h2{border-bottom:2px solid #FF8C00;padding-bottom:10px}"
-".card{background:#2a2a2a;padding:20px;margin:10px 0;border-radius:8px}"
-".value{font-size:2em;font-weight:bold;color:#FF8C00}"
-".label{color:#999;font-size:0.9em}"
-"button{background:#FF8C00;color:#fff;border:none;padding:8px 12px;margin:5px;border-radius:4px;cursor:pointer;width:140px;text-align:center;display:inline-block}"
-"button:hover{background:#e67e22}"
-"input{padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;max-width:100%}"
-        "textarea{width:100%;max-width:100%;box-sizing:border-box;padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;resize:vertical}"
-        ".topbar{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:0.9em;background:rgba(0,0,0,0.15);border-radius:6px;margin-bottom:12px}"
-        ".topbar a{color:#fff;text-decoration:none;font-weight:600}"
-        ".topbar .version{color:#ddd;font-size:0.85em}"
-        "@media (max-width:700px) {"
-            "body{padding:12px;margin:8px}"
-            ".card{padding:12px}"
-            ".topbar{font-size:0.85em;flex-direction:column;align-items:flex-start;gap:6px}"
-            ".topbar .version{align-self:flex-end}"
-            "input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0; }"
-            "/* ensure value text scales a bit */"
-            ".value{font-size:1.6em}"
-        "}"
-    "</style>"
-    "<link rel='stylesheet' href='styles.css'>"
-    "</head><body>"
-"<div class='topbar'><a href='https://github.com/DiabloPower/burn2cool' target='_blank' rel='noopener'>GitHub</a><div class='version'>v" DAEMON_VERSION "</div></div>"
-"<h1>Burn2Cool Dashboard</h1>"
-"<div class='card'>"
-"<h2>Current Status</h2>"
-"<div class='label'>Temperature</div>"
-"<div class='value' id='temp'>--</div>"
-"<div class='label'>Frequency</div>"
-"<div class='value' id='freq'>--</div>"
-"</div>"
-"<div class='card'>"
-"<h2>Settings</h2>"
-"<div><input id='safe_max' type='number' placeholder='Safe Max (kHz)'>"
-"<button onclick='setSetting(\"safe-max\",document.getElementById(\"safe_max\").value)'>Set Max</button></div>"
-"<div><input id='safe_min' type='number' placeholder='Safe Min (kHz)'>"
-"<button onclick='setSetting(\"safe-min\",document.getElementById(\"safe_min\").value)'>Set Min</button></div>"
-"<div><input id='temp_max' type='number' placeholder='Temp Max (C)'>"
-"<button onclick='setSetting(\"temp-max\",document.getElementById(\"temp_max\").value)'>Set Temp</button></div>"
-"</div>"
-"<div class='card'>"
-"<h2>Profiles</h2>"
-"<div class='label'>"
-"  <label for='profilesSelect'>Choose profile:</label>"
-"  <select id='profilesSelect' class='profiles-select'>"
-"    <option value=''>(loading...)</option>"
-"  </select>"
-"</div>"
-"<hr/>"
-"<input id='pname' placeholder='profile filename' />"
-"<textarea id='pcontent' rows='6' placeholder='profile content (key=value lines)'></textarea>"
-"<div>"
-"  <button id='createBtn' onclick='createProfile()'>Create</button>"
-"  <button id='saveBtn' onclick='saveProfile()'>Save</button>"
-"  <button id='deleteBtn' onclick='deleteProfile()'>Delete</button>"
-"  <button id='loadBtn' onclick='loadProfile()'>Load to daemon</button>"
-"</div>"
-"<div id='toast' style='position:fixed; top:20px; right:20px; padding:12px 16px; border-radius:6px; background:#333; border:1px solid #555; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:1000; display:none; font-weight:bold;'></div>"
-"</div>"
-"<script>"
-"function showToast(message, type = 'success'){"
-"  console.log('Showing toast:', message, type);"
-"  const toast = document.getElementById('toast');"
-"  console.log('Toast element:', toast);"
-"  toast.innerText = message;"
-"  if (type === 'success') {"
-"    toast.style.background = 'green';"
-"    toast.style.color = 'white';"
-"  } else {"
-"    toast.style.background = 'red';"
-"    toast.style.color = 'white';"
-"  }"
-"  toast.style.display = 'block';"
-"  setTimeout(() => { toast.style.display = 'none'; }, 3000);"
-"}"
-"function update(){"
-"  fetch('/api/status').then(r=>r.json()).then(d=>{"
-"    document.getElementById('temp').textContent=d.temperature+'°C';"
-"    document.getElementById('freq').textContent=(d.frequency/1000).toFixed(0)+' MHz';"
-"  }).catch(()=>{});"
-"  refreshProfiles();"
-"}"
-"function setSetting(name,val){"
-"  fetch('/api/settings/'+name,{method:'POST',body:JSON.stringify({value:parseInt(val)}),headers:{'Content-Type':'application/json'}}).then(()=>update());"
-"}"
-"function refreshProfiles(){"
-"  fetch('/api/profiles').then(r=>r.json()).then(obj=>{"
-"    const list = (obj && obj.profiles) ? obj.profiles : [];"
-"    const select = document.getElementById('profilesSelect');"
-"    const prev = select.value;"
-"    select.innerHTML = '';"
-"    if(!list || !Array.isArray(list) || list.length===0){"
-"      const opt = document.createElement('option'); opt.value=''; opt.textContent='(no profiles)'; select.appendChild(opt); return;"
-"    }"
-"    const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='(select a profile)'; select.appendChild(placeholder);"
-"    list.forEach(p=>{"
-"      const opt = document.createElement('option'); opt.value = p.name; opt.textContent = p.name; select.appendChild(opt);"
-"    });"
-"    if(prev){ const found = Array.from(select.options).some(o=>o.value===prev); if(found) select.value = prev; }"
-"    select.onchange = function(){ if(this.value) loadProfileToEditor(this.value); };"
-"  }).catch(()=>{"
-"    const select = document.getElementById('profilesSelect'); select.innerHTML=''; const opt=document.createElement('option'); opt.value=''; opt.textContent='(failed)'; select.appendChild(opt);"
-"  });"
-"}"
-"function loadProfileToEditor(name){"
-"  fetch('/api/profiles/'+encodeURIComponent(name)).then(r=>{ if(!r.ok) throw 0; return r.text(); }).then(t=>{"
-"    console.log('Loaded to editor'); document.getElementById('pname').value = name;"
-"    document.getElementById('pcontent').value = t;"
-"    showToast('Profile loaded to editor', 'success');"
-"  }).catch(e=>{ console.log('Load to editor error:', e); showToast('Failed to load profile', 'error'); });"
-"}"
-"function createProfile(){"
-"  const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;"
-"  if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/profiles', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name,content})}).then(r=>{ if(r.ok){ showToast('Profile created', 'success'); refreshProfiles(); } else { showToast('Create failed', 'error'); } });"
-"}"
-"function saveProfile(){"
-"  const name = document.getElementById('pname').value.trim(); const content = document.getElementById('pcontent').value;"
-"  if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok){ console.log('Save successful'); showToast('Profile saved', 'success'); refreshProfiles(); } else { console.log('Save failed'); showToast('Save failed', 'error'); } }).catch(e=>{ console.log('Fetch error:', e); });"
-"}"
-"async function deleteProfile(){"
-"  const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }"
-"  if(!(typeof window.showConfirm === 'function' ? await window.showConfirm('Delete '+name+'?') : window.confirm('Delete '+name+'?'))) return;"
-"  fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ showToast('Profile deleted', 'success'); document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else { showToast('Delete failed', 'error'); } });"
-"}"
-"function loadProfile(){"
-"  const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }"
-"  fetch('/api/command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'load-profile '+name})}).then(r=>r.json()).then(j=>{ if(j && j.ok){ showToast('Profile loaded to daemon', 'success'); } else { showToast('Load failed', 'error'); } }).catch(()=>{ showToast('Load failed', 'error'); });"
-"}"
-"document.addEventListener('DOMContentLoaded', ()=>{"
-"  document.getElementById('createBtn').addEventListener('click', createProfile);"
-"  document.getElementById('saveBtn').addEventListener('click', saveProfile);"
-"  document.getElementById('deleteBtn').addEventListener('click', deleteProfile);"
-"  document.getElementById('loadBtn').addEventListener('click', loadProfile);"
-"  setInterval(update,1000); update();"
-"});"
-"</script>"
-"</body></html>";
-
-const char *main_js =
-"async function api(path, method='GET', body=null){\n"
-"  const opts = {method, headers:{}};\n"
-"  if(body!==null){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }\n"
-"  const r = await fetch('/api'+path, opts);\n"
-"  return r.json();\n"
-"}\n\n"
-"// Provide global showConfirm fallback if not present (modal implementation on index.html will override)\n"
-"if (typeof window.showConfirm !== 'function') { window.showConfirm = function(msg){ return new Promise((resolve)=>{ resolve(window.confirm(msg)); }); } }\n\n"
-"let profilesCache = [];\n\n"
-"async function refresh(){\n"
-"  const data = await api('/profiles');\n"
-"  if(!data.ok){ return; }\n"
-"  profilesCache = data.profiles;\n"
-"  renderList();\n"
-"}\n\n"
-"function renderList(){\n"
-"  const list = document.getElementById('list');\n"
-"  const filter = document.getElementById('filter').value.trim().toLowerCase();\n"
-"  list.innerHTML = '';\n"
-"  for(const p of profilesCache){\n"
-"    if(filter && !p.name.toLowerCase().includes(filter) && !p.content.toLowerCase().includes(filter)) continue;\n"
-"    const el = document.createElement('div');\n"
-"    el.className = 'profile';\n"
-"    el.innerHTML = `<strong>${p.name}</strong><div class='preview'>${escapeHtml(p.content).replace(/\\n/g,'<br>')}</div>`;\n"
-"    el.addEventListener('click', ()=>{\n"
-"      document.getElementById('pname').value = p.name;\n"
-"      document.getElementById('pcontent').value = p.content;\n"
-"    });\n"
-"    const loadBtn = document.createElement('button'); loadBtn.textContent='Load';\n"
-"    loadBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await loadProfile(p.name); });\n"
-"    el.appendChild(loadBtn);\n"
-"    list.appendChild(el);\n"
-"  }\n"
-"}\n\n"
-"function escapeHtml(str){ return (str||'').replace(/[&<>\\\"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c])); }\n\n"
-"async function createProfile(){\n"
-"  const name = document.getElementById('pname').value.trim();\n"
-"  const content = document.getElementById('pcontent').value;\n"
-"  if(!name){ alert('Enter profile filename'); return; }\n"
-"  const r = await api('/profiles', 'POST', {name, content});\n"
-"  if(!r.ok) ;\n"
-"  else await refresh();\n"
-"}\n\n"
-"async function saveProfile(){\n"
-"  const name = document.getElementById('pname').value.trim();\n"
-"  const content = document.getElementById('pcontent').value;\n"
-"  if(!name){ alert('Enter profile filename'); return; }\n"
-"  const r = await api('/profiles/'+encodeURIComponent(name), 'PUT', {content});\n"
-"  if(!r.ok) ;\n"
-"  else await refresh();\n"
-"}\n\n"
-"async function deleteProfile(){\n"
-"  const name = document.getElementById('pname').value.trim();\n"
-"  if(!name){ alert('Enter profile filename'); return; }\n"
-"  if(!(typeof window.showConfirm === 'function' ? await window.showConfirm('Delete profile '+name+' ?') : window.confirm('Delete profile '+name+' ?'))) return;\n"
-"  const r = await api('/profiles/'+encodeURIComponent(name), 'DELETE');\n"
-"  if(!r.ok) ;\n"
-"  else { document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; await refresh(); }\n"
-"}\n\n"
-"async function loadProfile(name){\n"
-"  // ask server to send load-profile NAME\n"
-"  const r = await api('/command','POST',{cmd:`load-profile ${name}`});\n"
-"  if(!r.ok) ;\n"
-"  else ;\n"
-"}\n\n"
-"async function sendCmd(){\n"
-"  const cmd = document.getElementById('cmdInput').value.trim();\n"
-"  if(!cmd) return;\n"
-"  const r = await api('/command','POST',{cmd});\n"
-"  if(!r.ok) ;\n"
-"  else document.getElementById('statusBox').textContent = r.resp;\n"
-"}\n\n"
-"window.addEventListener('DOMContentLoaded', ()=>{\n"
-"  document.getElementById('refresh').addEventListener('click', refresh);\n"
-"  document.getElementById('create').addEventListener('click', createProfile);\n"
-"  document.getElementById('save').addEventListener('click', saveProfile);\n"
-"  document.getElementById('delete').addEventListener('click', deleteProfile);\n"
-"  document.getElementById('load').addEventListener('click', ()=>{ const n=document.getElementById('pname').value.trim(); if(n) loadProfile(n); });\n"
-"  document.getElementById('sendCmd').addEventListener('click', sendCmd);\n"
-"  document.getElementById('filter').addEventListener('keydown', (e)=>{ if(e.key==='Enter') refresh(); });\n"
-"  document.getElementById('clearFilter').addEventListener('click', ()=>{ document.getElementById('filter').value=''; refresh(); });\n"
-"  refresh();\n"
-"});\n";
-
-const char *styles_css =
-"*, *:before, *:after { box-sizing: border-box; }\n"
-"body{ font-family: sans-serif; margin: 12px; }\n"
-"header h1{ margin:0 0 12px 0 }\n"
-"main{ display:flex; gap:20px }\n"
-"#profiles, #status{ flex:1 }\n"
-"#list{ max-height:400px; overflow:auto; border:1px solid #ccc; padding:6px }\n"
-".profile{ padding:6px; margin-bottom:6px; border-bottom:1px dashed #eee }\n"
-".profile .preview{ color:#333; font-size:0.9em }\n"
-"textarea{ width:100%; max-width:100%; box-sizing:border-box; resize:vertical }\n"
-"input, textarea, button{ font-size:0.95em }\n"
-"button{ min-width:140px; width:140px; padding:8px 12px; }\n"
-"pre{ background:#f6f6f6; padding:8px; border:1px solid #ddd }\n"
-"@media (max-width:700px) {\n"
-"  body{ margin:8px; padding:12px }\n"
-"  .card{ padding:12px }\n"
-"  input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0 }\n"
-"}\n";
+// Embedded dashboard: removed to avoid duplicate runtime/data (use generated headers or assets/)
+// HTML/JS/CSS fallbacks removed; use generated headers or serve assets from disk instead.
 
 // Simple JSON helper to extract string value for a key like "cmd" or "name" from a small JSON body
 static int extract_json_string(const char *body, const char *key, char *out, size_t outsz) {
@@ -1122,7 +916,8 @@ void handle_http_request(int client_fd, const char *request) {
             #ifdef USE_ASSET_HEADERS
                 send_http_response_len(client_fd, "200 OK", "image/x-icon", ASSET_FAVICON, ASSET_FAVICON_LEN, NULL);
             #else
-                send_http_response(client_fd, "200 OK", "image/x-icon", "");
+                if (serve_asset_from_disk(client_fd, "/favicon.ico")) return;
+                send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
             #endif
                 return;
                 }
@@ -1131,7 +926,8 @@ void handle_http_request(int client_fd, const char *request) {
             #ifdef USE_ASSET_HEADERS
                 send_http_response_len(client_fd, "200 OK", "application/javascript", ASSET_MAIN_JS, ASSET_MAIN_JS_LEN, NULL);
             #else
-                send_http_response(client_fd, "200 OK", "application/javascript", main_js);
+                if (serve_asset_from_disk(client_fd, "/main.js")) return;
+                send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
             #endif
                 return;
                 }
@@ -1139,19 +935,21 @@ void handle_http_request(int client_fd, const char *request) {
         #ifdef USE_ASSET_HEADERS
             send_http_response_len(client_fd, "200 OK", "text/css", ASSET_STYLES_CSS, ASSET_STYLES_CSS_LEN, NULL);
         #else
-            send_http_response(client_fd, "200 OK", "text/css", styles_css);
+            if (serve_asset_from_disk(client_fd, "/styles.css")) return;
+            send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
         #endif
             return;
             }
 
     // Route API requests
         if (strcmp(path, "/") == 0) {
-    #ifdef USE_ASSET_HEADERS
-        send_http_response_len(client_fd, "200 OK", "text/html", ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, NULL);
-    #else
-        send_http_response(client_fd, "200 OK", "text/html", html_dashboard);
-    #endif
-        }
+        #ifdef USE_ASSET_HEADERS
+            send_http_response_len(client_fd, "200 OK", "text/html", ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, NULL);
+        #else
+            if (serve_asset_from_disk(client_fd, "/index.html")) return;
+            send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
+        #endif
+            }
     else if (strcmp(path, "/api/status") == 0 && strcmp(method, "GET") == 0) {
         build_status_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
