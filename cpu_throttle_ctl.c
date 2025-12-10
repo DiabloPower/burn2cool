@@ -58,6 +58,13 @@ void print_help(const char *name) {
     printf("  zones                  Print thermal zones\n");
     printf("  restart                Restart the daemon (if running)\n");
     printf("  start                  Start the daemon (systemctl or background)\n");
+    printf("\nSkin commands:\n");
+        printf("  skins list             List installed system-wide skins\n");
+        printf("  skins install <archive> Install a local skin archive (tar.gz, tar, zip) by uploading it to the daemon\n");
+        printf("  skins activate <id>    Activate a skin by id\n");
+        printf("  skins deactivate <id>  Deactivate the specified skin\n");
+        printf("  skins remove <id>      Remove a skin (delete files; admin-only)\n");
+        printf("  skins default          Reset UI to the built-in default (clear active skin)\n");
     printf("\nExamples:\n");
     printf("  %s set-safe-max 3000000\n", name);
     printf("  %s save-profile gaming\n", name);
@@ -87,7 +94,8 @@ int send_command(const char *cmd) {
 
     printf("Connected to socket\n");
 
-    if (send(sock_fd, cmd, strlen(cmd), 0) < 0) {
+    char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (send(sock_fd, cmd_nl, strlen(cmd_nl), 0) < 0) {
         perror("send");
         close(sock_fd);
         return -1;
@@ -111,6 +119,25 @@ int send_command(const char *cmd) {
 
     close(sock_fd);
     return 0;
+}
+
+// Send a command and return the response string (malloc'ed, caller frees).
+char *send_command_get_response(const char *cmd) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) return NULL;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock_fd); return NULL; }
+    char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (send(sock_fd, cmd_nl, strlen(cmd_nl), 0) < 0) { close(sock_fd); return NULL; }
+    // Read up to some reasonable max (e.g., 32KB)
+    size_t cap = 32768; char *buf = malloc(cap);
+    if (!buf) { close(sock_fd); return NULL; }
+    ssize_t n = recv(sock_fd, buf, (ssize_t)cap - 1, 0);
+    close(sock_fd);
+    if (n <= 0) { free(buf); return NULL; }
+    buf[n] = '\0';
+    return buf;
 }
 
 void save_profile(const char *profile_name) {
@@ -361,6 +388,97 @@ int main(int argc, char *argv[]) {
         }
         printf("Started cpu_throttle in background\n");
         return 0;
+    }
+
+    // Skin commands
+    if (strcmp(argv[1], "skins") == 0) {
+                if (strcmp(argv[2], "install") == 0) {
+                    if (argc < 4) {
+                        fprintf(stderr, "Error: archive path required for 'skins install'\n");
+                        return 1;
+                    }
+                    // open file and send via put-skin
+                    FILE *fp = fopen(argv[3], "rb");
+                    if (!fp) { fprintf(stderr, "Error: cannot open file %s\n", argv[3]); return 1; }
+                    fseek(fp, 0, SEEK_END); long fsize = ftell(fp); fseek(fp, 0, SEEK_SET);
+                    if (fsize <= 0) { fprintf(stderr, "Error: empty file\n"); fclose(fp); return 1; }
+                    // compose header: put-skin <basename> <len>\n
+                    char *base = strrchr(argv[3], '/'); if (base) base++; else base = argv[3];
+                    char header[512]; int hlen = snprintf(header, sizeof(header), "put-skin %s %ld\n", base, (long)fsize);
+                    if (hlen < 0 || hlen >= (int)sizeof(header)) { fprintf(stderr, "Error: header too large\n"); fclose(fp); return 1; }
+                    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                    if (sock_fd < 0) { perror("socket"); fclose(fp); return 1; }
+                    struct sockaddr_un addr; memset(&addr,0,sizeof(addr)); addr.sun_family=AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+                    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("connect"); close(sock_fd); fclose(fp); return 1; }
+                    if (send(sock_fd, header, hlen, 0) != hlen) { perror("send header"); close(sock_fd); fclose(fp); return 1; }
+                    char buf[4096]; size_t remaining = (size_t)fsize; while (remaining) {
+                        size_t toread = remaining > sizeof(buf) ? sizeof(buf) : remaining; size_t r = fread(buf,1,toread,fp); if (r <= 0) { fprintf(stderr, "Error: fread failed\n"); close(sock_fd); fclose(fp); return 1; }
+                        size_t off = 0; while (off < r) { ssize_t s = send(sock_fd, buf+off, r-off, 0); if (s <= 0) { perror("send"); close(sock_fd); fclose(fp); return 1; } off += (size_t)s; }
+                        remaining -= r;
+                    }
+                    fclose(fp);
+                    char resp[1024]; ssize_t n = recv(sock_fd, resp, sizeof(resp)-1, 0); if (n > 0) { resp[n]='\0'; printf("%s", resp); }
+                    close(sock_fd);
+                    return 0;
+                }
+        if (argc < 3) {
+            fprintf(stderr, "Error: skins subcommand required (list|activate)");
+            return 1;
+        }
+        if (strcmp(argv[2], "list") == 0) {
+            return send_command("list-skins");
+        }
+        else if (strcmp(argv[2], "activate") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: skin id required for 'skins activate'\n");
+                return 1;
+            }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "activate-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else if (strcmp(argv[2], "deactivate") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: skin id required for 'skins deactivate'\n");
+                return 1;
+            }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "deactivate-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else if (strcmp(argv[2], "default") == 0) {
+            // Reset to default: find currently active skin via list-skins json, then deactivate it
+            char *resp = send_command_get_response("list-skins json");
+            if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
+            char *p = resp;
+            int done = 0;
+            while (p) {
+                char *idpos = strstr(p, "\"id\":\"");
+                if (!idpos) break;
+                idpos += strlen("\"id\":\"");
+                char *idend = strchr(idpos, '"'); if (!idend) break;
+                size_t idlen = (size_t)(idend - idpos);
+                char idbuf[256] = {0}; if (idlen >= sizeof(idbuf)) idlen = sizeof(idbuf)-1; memcpy(idbuf, idpos, idlen); idbuf[idlen] = '\0';
+                char *activepos = strstr(idpos, "\"active\":true");
+                if (activepos && activepos < strchr(idpos, '}')) {
+                    // deactivate this skin
+                    char cmd[256]; snprintf(cmd, sizeof(cmd), "deactivate-skin %s", idbuf);
+                    send_command(cmd);
+                    done = 1; break;
+                }
+                p = idpos + idlen;
+            }
+            free(resp);
+            if (!done) { fprintf(stderr, "No active skin found or failed to deactivate.\n"); return 1; }
+            return 0;
+        }
+        else if (strcmp(argv[2], "remove") == 0) {
+            if (argc < 4) { fprintf(stderr, "Error: skin id required for 'skins remove'\n"); return 1; }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "remove-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else {
+            fprintf(stderr, "Error: Unknown skins subcommand '%s'\n", argv[2]);
+            return 1;
+        }
     }
 
     // Build command string for daemon

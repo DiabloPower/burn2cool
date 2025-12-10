@@ -1,0 +1,8 @@
+/* Test Skin CSS: Distinct green accent and visible differences */
+:root { --accent: #28a745; }
+body { background: linear-gradient(180deg, #042014 0%, #07341e 100%); color: #E6FFE6; }
+.topbar { background: rgba(40,167,69,0.12); }
+h1, h2 { color: var(--accent); }
+.card { border: 1px solid rgba(40,167,69,0.2); box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+button { background: var(--accent); color: #fff; }
+.value { color: var(--accent); }

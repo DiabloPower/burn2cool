@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <libgen.h>
 #include <ctype.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -110,30 +111,15 @@ char **saved_argv = NULL;
 #endif
 
 #else /* !USE_ASSET_HEADERS */
-/* Assets directory: default path to serve static assets. */
-const char *ASSETS_DIR = "assets";
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return NULL;
-    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
-    long len = ftell(fp);
-    if (len < 0) { fclose(fp); return NULL; }
-    rewind(fp);
-    char *buf = malloc(len + 1);
-    if (!buf) { fclose(fp); return NULL; }
-    size_t r = fread(buf, 1, len, fp);
-    fclose(fp);
-    buf[r] = '\0';
-    if (out_len) *out_len = r;
-    return buf;
-}
-
-    
+#/**************************************************************/
 
 /* forward declaration for send_http_response_len to avoid implicit declaration
  * when file-serving helper is compiled earlier than the response function. */
 void send_http_response_len(int client_fd, const char *status, const char *content_type, const void *body, size_t len, const char *extra_headers);
 /* forward declaration for guess_mime for use by serve_file */
 static const char *guess_mime(const char *path);
+/* forward declaration for parse_skin_manifest used by installer install helper */
+/* forward declaration for parse_skin_manifest used by installer install helper: will be declared unconditionally below */
 
 #endif /* USE_ASSET_HEADERS */
 #ifndef ASSET_MAIN_JS
@@ -158,6 +144,9 @@ void signal_handler(int sig) {
     (void)sig;
     should_exit = 1;
 }
+
+/* forward declaration for parse_skin_manifest used across the daemon */
+static void parse_skin_manifest(const char *manifest_path, char *out_id, size_t id_sz, char *out_name, size_t name_sz, int *allow_extra_js);
 
 /* Read a file from disk and return allocated buffer (caller must free()) */
 static char *read_file_alloc(const char *path, size_t *out_len) {
@@ -185,6 +174,24 @@ static const char *guess_mime(const char *path){
     return "application/octet-stream";
 }
 
+/* Portable memmem implementation for platforms that do not have glibc memmem.
+ * This is a naive implementation suitable for small assets (index.html) and
+ * avoids relying on non-portable functions on non-glibc systems. */
+#ifdef USE_ASSET_HEADERS
+static void *memmem_shim(const void *haystack, size_t haystack_len, const void *needle, size_t needle_len) {
+    if (!haystack || !needle) return NULL;
+    const unsigned char *h = haystack;
+    const unsigned char *n = needle;
+    if (needle_len == 0) return (void *)haystack;
+    if (haystack_len < needle_len) return NULL;
+    size_t last = haystack_len - needle_len;
+    for (size_t i = 0; i <= last; ++i) {
+        if (h[i] == n[0] && memcmp(&h[i], n, needle_len) == 0) return (void *)&h[i];
+    }
+    return NULL;
+}
+#endif
+
 /* Read a file from disk and send as HTTP response (content length known).
  * Returns 1 on success (served), 0 if not found, -1 on error. */
 static int serve_file(int client_fd, const char *path) {
@@ -209,20 +216,46 @@ static int skin_has_file(const char *skin_id, const char *relpath) {
 static int serve_file_with_skin_extra(int client_fd, const char *path, const char *skin_id) {
     size_t len; char *buf = read_file_alloc(path, &len);
     if (!buf) return 0;
+    // Inject skin CSS and extra.js when serving default index so skins can style
+    // the existing UI without providing a complete index.html.
+    int inject_css = 0;
+    if (skin_id && skin_id[0] && skin_has_file(skin_id, "styles.css")) inject_css = 1;
     if (skin_id && skin_id[0] && skin_has_file(skin_id, "extra.js")) {
-        const char *script = "<script src=\"/skins/"; char injection[512];
+        char injection[512];
         snprintf(injection, sizeof(injection), "<script src=\"/skins/%s/extra.js\"></script>", skin_id);
         // Find last </body> occurrence to inject before
         char *pos = NULL; char *p = strstr(buf, "</body>");
         if (p) pos = p; else pos = NULL;
-        if (pos) {
-            size_t newlen = len + strlen(injection);
+            if (pos) {
+            size_t injlen = strlen(injection);
+            size_t newlen = len + injlen;
             char *nb = malloc(newlen + 1);
-            if (nb) {
+                if (nb) {
                 size_t prefix = pos - buf;
                 memcpy(nb, buf, prefix);
-                memcpy(nb + prefix, injection, strlen(injection));
-                memcpy(nb + prefix + strlen(injection), pos, len - prefix);
+                memcpy(nb + prefix, injection, injlen);
+                memcpy(nb + prefix + injlen, pos, len - prefix);
+                nb[newlen] = '\0';
+                send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
+                free(nb);
+                free(buf);
+                return 1;
+            }
+        }
+    }
+    // CSS injection: insert <link rel="stylesheet" href="/skins/%s/styles.css"> inside <head>
+    if (inject_css) {
+        char css_inj[256]; snprintf(css_inj, sizeof(css_inj), "<link rel=\"stylesheet\" href=\"/skins/%s/styles.css\">", skin_id);
+        char *headpos = strstr(buf, "</head>");
+        if (headpos) {
+            size_t prefix = headpos - buf;
+            size_t injlen = strlen(css_inj);
+            size_t newlen = len + injlen;
+            char *nb = malloc(newlen + 1);
+            if (nb) {
+                memcpy(nb, buf, prefix);
+                memcpy(nb + prefix, css_inj, injlen);
+                memcpy(nb + prefix + injlen, headpos, len - prefix);
                 nb[newlen] = '\0';
                 send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
                 free(nb);
@@ -254,7 +287,26 @@ static int serve_skin_asset(int client_fd, const char *skin_id, const char *relp
     // remove leading slash if present in relpath
     const char *r = relpath[0] == '/' ? relpath + 1 : relpath;
     snprintf(path, sizeof(path), "%s/%s/%s", SKINS_DIR, skin_id, r);
-    return serve_file(client_fd, path);
+    LOG_VERBOSE("serve_skin_asset: trying path=%s\n", path);
+    int rc = serve_file(client_fd, path);
+    LOG_VERBOSE("serve_skin_asset: rc=%d\n", rc);
+    return rc;
+}
+
+// Return 1 if skin's index.html appears to be a full dashboard replacement.
+// We detect this by checking for a few known DOM markers from the default UI.
+static int skin_index_is_full(const char *skin_id) {
+    if (!skin_id || !skin_id[0]) return 0;
+    char path[1024]; snprintf(path, sizeof(path), "%s/%s/index.html", SKINS_DIR, skin_id);
+    size_t len; char *buf = read_file_alloc(path, &len);
+    if (!buf) return 0;
+    int full = 0;
+    // Look for default UI markers: topbar, cards-grid, or title h1
+    if (strstr(buf, "class='topbar'") || strstr(buf, "class=\"topbar\"") || strstr(buf, "class='cards-grid'") || strstr(buf, "class=\"cards-grid\"") || strstr(buf, "<h1>") || strstr(buf, "class='status-card'")) {
+        full = 1;
+    }
+    free(buf);
+    return full;
 }
 
 void cleanup_socket() {
@@ -374,6 +426,153 @@ static int skin_exists(const char *id) {
     return 0;
 }
 
+// Return 1 if skin has allow_extra_js true in manifest
+static int skin_allows_extra_js(const char *id) {
+    if (!id || !id[0]) return 0;
+    char mpath[1024]; snprintf(mpath, sizeof(mpath), "%s/%s/manifest.json", SKINS_DIR, id);
+    FILE *fp = fopen(mpath, "r"); if (!fp) return 0;
+    char buf[4096]; size_t r = fread(buf, 1, sizeof(buf)-1, fp); buf[r] = '\0'; fclose(fp);
+    char *p = strstr(buf, "\"allow_extra_js\""); if (!p) return 0;
+    char *q = strchr(p, ':'); if (!q) return 0; while (*q && (*q == ':' || isspace((unsigned char)*q))) q++;
+    if (strncmp(q, "true", 4) == 0) return 1; else return 0;
+}
+
+/* Install a skin archive from a temporary path. This performs an insecure but
+ * practical extraction using system utilities (tar/unzip) and copies the
+ * extracted content into SKINS_DIR/<id>. The caller must enforce admin
+ * constraints and check request authentication as needed. */
+static int install_skin_archive_from_file(const char *archive_path, char *out_id, size_t id_sz) {
+    if (!archive_path || !out_id) return -1;
+    out_id[0] = '\0';
+    char staging_template[] = "/tmp/burn2cool_skin_XXXXXX";
+    char *staging = mkdtemp(staging_template);
+    if (!staging) return -1;
+    // Determine archive type by magic
+    FILE *af = fopen(archive_path, "rb");
+    if (!af) { rmdir(staging); return -1; }
+    unsigned char sig[4]; size_t r = fread(sig, 1, sizeof(sig), af); fclose(af);
+    int use_tar = 0, use_zip = 0;
+    if (r >= 2 && sig[0] == 0x1F && sig[1] == 0x8B) use_tar = 1; // gzip
+    if (r >= 2 && sig[0] == 'P' && sig[1] == 'K') use_zip = 1; // zip
+
+    char cmd[1024]; int rc = -1;
+    // Try common extraction patterns: gzip tar, plain tar, unzip
+    if (use_tar) {
+        snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", archive_path, staging);
+        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
+        rc = system(cmd);
+        if (rc != 0) {
+            // try plain tar (uncompressed)
+            snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s' 2>/dev/null", archive_path, staging);
+            LOG_VERBOSE("install_skin_archive_from_file: running fallback: %s\n", cmd);
+            rc = system(cmd);
+        }
+    } else if (use_zip) {
+        snprintf(cmd, sizeof(cmd), "unzip -q '%s' -d '%s' 2>/dev/null", archive_path, staging);
+        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
+        rc = system(cmd);
+    } else {
+        // unknown: try gzip tar first, then plain tar, then unzip
+        snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", archive_path, staging);
+        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
+        rc = system(cmd);
+        if (rc != 0) {
+            snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s' 2>/dev/null", archive_path, staging);
+            LOG_VERBOSE("install_skin_archive_from_file: running fallback: %s\n", cmd);
+            rc = system(cmd);
+        }
+        if (rc != 0) {
+            snprintf(cmd, sizeof(cmd), "unzip -q '%s' -d '%s' 2>/dev/null", archive_path, staging);
+            LOG_VERBOSE("install_skin_archive_from_file: running fallback unzip: %s\n", cmd);
+            rc = system(cmd);
+        }
+    }
+    if (rc != 0) { /* failed to extract */
+        LOG_ERROR("install_skin_archive_from_file: failed to extract archive %s (rc=%d)\n", archive_path, rc);
+        // cleanup
+        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging);
+        system(cmd);
+        return -1;
+    }
+    // After extraction, check whether the staging area contains a single
+    // top-level directory. If so, use that directory as the source so that
+    // archives that wrap the content in a top-level folder (e.g., 'example/')
+    // don't create nested paths like <id>/<id>/... when copied to SKINS_DIR.
+    // This logic runs before 'cp -a'.
+    char src_path[1024];
+    {
+        DIR *sd = opendir(staging);
+        if (sd) {
+            struct dirent *entry;
+            int top_count = 0;
+            char candidate[1024] = {0};
+            while ((entry = readdir(sd)) != NULL) {
+                if (entry->d_name[0] == '.') continue;
+                // only count non-hidden entries
+                top_count++;
+                if (top_count == 1) strncpy(candidate, entry->d_name, sizeof(candidate)-1);
+            }
+            closedir(sd);
+            if (top_count == 1) {
+                // It's a single top-level dir, use it as source
+                snprintf(src_path, sizeof(src_path), "%s/%s", staging, candidate);
+                LOG_VERBOSE("install_skin_archive_from_file: top-level single dir detected: %s\n", src_path);
+            } else {
+                // Multiple entries or none, copy entire staging
+                snprintf(src_path, sizeof(src_path), "%s", staging);
+            }
+        } else {
+            snprintf(src_path, sizeof(src_path), "%s", staging);
+        }
+    }
+
+    // Find manifest
+    char manifest_path[1024];
+    snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth 3 -type f -name manifest.json -print -quit", staging);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+    if (!fgets(manifest_path, sizeof(manifest_path), fp)) { pclose(fp); snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+    pclose(fp);
+    // Trim newline
+    char *nl = strchr(manifest_path, '\n'); if (nl) *nl = '\0';
+    // Parse manifest
+    char idbuf[256] = {0}, namebuf[256] = {0}; int allow_js = 0;
+    parse_skin_manifest(manifest_path, idbuf, sizeof(idbuf), namebuf, sizeof(namebuf), &allow_js);
+    if (!idbuf[0]) {
+        // fallback to directory name containing manifest
+        char *dir = strdup(manifest_path);
+        if (!dir) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+        char *d = dirname(dir);
+        if (d) strncpy(idbuf, basename(d), sizeof(idbuf)-1);
+        free(dir);
+    }
+    if (!idbuf[0]) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+    // Install to SKINS_DIR/<id>
+    char dest[1024]; snprintf(dest, sizeof(dest), "%s/%s", SKINS_DIR, idbuf);
+    // Use quoting that allows glob expansion for rm -rf path/* while still being safe for paths with spaces
+    // Use the computed src_path that may have stripped a single top-level dir
+    snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && rm -rf '%s'/* && cp -a '%s'/. '%s' && chown -R root:root '%s'", dest, dest, src_path, dest, dest);
+    LOG_VERBOSE("install_skin_archive_from_file: running install cmd: %s\n", cmd);
+    rc = system(cmd);
+    // Cleanup
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd);
+    if (rc != 0) { LOG_ERROR("install_skin_archive_from_file: failed to copy/perm dest %s (rc=%d)\n", dest, rc); return -1; }
+    // Success
+    strncpy(out_id, idbuf, id_sz-1); out_id[id_sz-1] = '\0';
+    return 0;
+}
+
+// Primitive manifest parsing: look for "name" or "id" keys
+// Trim whitespace in-place
+static void trim_whitespace(char *s) {
+    if (!s) return;
+    // trim left
+    char *p = s; while (*p && isspace((unsigned char)*p)) p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    // trim right
+    size_t l = strlen(s); while (l && isspace((unsigned char)s[l-1])) s[--l] = '\0';
+}
+
 // Primitive manifest parsing: look for "name" or "id" keys
 static void parse_skin_manifest(const char *manifest_path, char *out_id, size_t id_sz, char *out_name, size_t name_sz, int *allow_extra_js) {
     out_id[0] = '\0'; out_name[0] = '\0'; if (allow_extra_js) *allow_extra_js = 0;
@@ -382,13 +581,18 @@ static void parse_skin_manifest(const char *manifest_path, char *out_id, size_t 
     // crude parsing
     char *p = strstr(buf, "\"id\"");
     if (p) { char *q = strchr(p, ':'); if (q) { char *s = strchr(q, '"'); if (s) { s++; char *e = strchr(s, '"'); if (e) { size_t len = e - s; if (len >= id_sz) len = id_sz - 1; memcpy(out_id, s, len); out_id[len] = '\0'; } } } }
+    trim_whitespace(out_id);
     p = strstr(buf, "\"name\"");
     if (p) { char *q = strchr(p, ':'); if (q) { char *s = strchr(q, '"'); if (s) { s++; char *e = strchr(s, '"'); if (e) { size_t len = e - s; if (len >= name_sz) len = name_sz - 1; memcpy(out_name, s, len); out_name[len] = '\0'; } } } }
-    if (allow_extra_js) { p = strstr(buf, "\"allow_extra_js\""); if (p) { char *q = strchr(p, ':'); if (q) { while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == ':') q++; if (strncmp(q, "true", 4) == 0) *allow_extra_js = 1; } } }
+    trim_whitespace(out_name);
+    if (allow_extra_js) { p = strstr(buf, "\"allow_extra_js\""); if (p) { char *q = strchr(p, ':'); if (q) { while (*q && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == ':')) q++; if (strncmp(q, "true", 4) == 0) *allow_extra_js = 1; } } }
 }
 
 void build_skins_json(char *buf, size_t bufsz) {
     char tmp[4096]; size_t used = 0;
+    /* track seen skin ids to prevent duplicates when scanning multiple locations */
+    // store normalized (lowercase, trimmed) id values
+    char seen_ids[256][256]; size_t seen_count = 0;
     DIR *d = opendir(SKINS_DIR); if (!d) { snprintf(buf, bufsz, "{\"skins\":[]}"); return; }
     struct dirent *ent; used += snprintf(tmp + used, sizeof(tmp) - used, "{\"skins\":["); int first = 1;
     while ((ent = readdir(d))) {
@@ -396,12 +600,33 @@ void build_skins_json(char *buf, size_t bufsz) {
         // ensure it's a directory
         char path[1024]; snprintf(path, sizeof(path), "%s/%s", SKINS_DIR, ent->d_name);
         struct stat st; if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        char manifest_path[1024]; snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", path);
+        char manifest_path[1024]; size_t pathlen = strlen(path);
+        if (pathlen + sizeof("/manifest.json") >= sizeof(manifest_path)) continue;
+        snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", path);
         char id[256]; char name[256]; int allow_js = 0; parse_skin_manifest(manifest_path, id, sizeof(id), name, sizeof(name), &allow_js);
-        if (!id[0]) strncpy(id, ent->d_name, sizeof(id)-1);
-        if (!name[0]) strncpy(name, id, sizeof(name)-1);
+        if (!id[0]) { strncpy(id, ent->d_name, sizeof(id)-1); id[sizeof(id)-1] = '\0'; }
+        if (!name[0]) { strncpy(name, id, sizeof(name)-1); name[sizeof(name)-1] = '\0'; }
+        /* normalize id for dedupe: lowercase and trim */
+        char normalized[256]; strncpy(normalized, id, sizeof(normalized)-1); normalized[sizeof(normalized)-1] = '\0';
+        for (char *p = normalized; *p; ++p) *p = tolower((unsigned char)*p);
+        trim_whitespace(normalized);
+        /* skip duplicate entries by normalized id (case-insensitive) */
+        int already = 0;
+        for (size_t si = 0; si < seen_count; ++si) {
+            if (strcmp(seen_ids[si], normalized) == 0) { already = 1; break; }
+        }
+        if (already) {
+            LOG_VERBOSE("build_skins_json: skipping duplicate id: %s (normalized=%s) at path=%s\n", id, normalized, path);
+            continue;
+        }
+        /* record id */
+        strncpy(seen_ids[seen_count], normalized, sizeof(seen_ids[0]) - 1);
+        seen_ids[seen_count][sizeof(seen_ids[0]) - 1] = '\0';
+        seen_count++;
         if (!first) used += snprintf(tmp + used, sizeof(tmp) - used, ",");
-        used += snprintf(tmp + used, sizeof(tmp) - used, "{\"id\":\"%s\",\"name\":\"%s\",\"allow_extra_js\":%s}", id, name, allow_js ? "true" : "false");
+        int is_active = (active_skin[0] && strcmp(id, active_skin) == 0) ? 1 : 0;
+        used += snprintf(tmp + used, sizeof(tmp) - used, "{\"id\":\"%s\",\"name\":\"%s\",\"allow_extra_js\":%s,\"active\":%s}", id, name, allow_js ? "true" : "false", is_active ? "true" : "false");
+        LOG_VERBOSE("build_skins_json: added skin id=%s name=%s active=%d\n", id, name, is_active);
         first = 0;
         if (used + 200 > sizeof(tmp)) break;
     }
@@ -1051,7 +1276,8 @@ static int extract_json_string(const char *body, const char *key, char *out, siz
 // Parse HTTP request and route to handlers
 void handle_http_request(int client_fd, const char *request) {
     char method[16], path[256];
-    sscanf(request, "%s %s", method, path);
+    /* Limit copied sizes to prevent stack overflow from unbounded tokens */
+    sscanf(request, "%15s %255s", method, path);
     
     LOG_VERBOSE("HTTP %s %s\n", method, path);
     
@@ -1109,26 +1335,58 @@ void handle_http_request(int client_fd, const char *request) {
 
     // Route API requests
         if (strcmp(path, "/") == 0) {
-                if (active_skin[0] && serve_skin_asset(client_fd, active_skin, "/index.html")) return;
+                if (active_skin[0]) {
+                    if (skin_index_is_full(active_skin)) {
+                        if (serve_skin_asset(client_fd, active_skin, "/index.html")) return;
+                        // fallback to default if serving failed
+                    } else {
+                        // Serve default index but inject skin css/extra.js when available
+                        if (serve_file_with_skin_extra(client_fd, "assets/index.html", active_skin)) return;
+                        // fallback to default below if injection failed
+                    }
+                }
         #ifdef USE_ASSET_HEADERS
-            if (active_skin[0] && skin_has_file(active_skin, "extra.js")) {
-                // inject extra.js into compiled index
-                const char *needle = "</body>";
-                char *bodypos = memmem(ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, needle, strlen(needle));
-                if (bodypos) {
-                    size_t prefix = (size_t)(bodypos - (char*)ASSET_INDEX_HTML);
-                    const char *injection_fmt = "<script src=\"/skins/%s/extra.js\"></script>";
-                    char injection[256]; snprintf(injection, sizeof(injection), injection_fmt, active_skin);
-                    size_t injlen = strlen(injection);
-                    size_t newlen = ASSET_INDEX_HTML_LEN + injlen;
-                    char *nb = malloc(newlen);
-                    if (nb) {
-                        memcpy(nb, ASSET_INDEX_HTML, prefix);
-                        memcpy(nb + prefix, injection, injlen);
-                        memcpy(nb + prefix + injlen, ASSET_INDEX_HTML + prefix, ASSET_INDEX_HTML_LEN - prefix);
-                        send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
-                        free(nb);
-                        return; // served
+            if (active_skin[0]) {
+                // CSS injection into compiled index head
+                if (skin_has_file(active_skin, "styles.css")) {
+                    const char *headneedle = "</head>";
+                    char *headpos = memmem_shim(ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, headneedle, strlen(headneedle));
+                    if (headpos) {
+                        size_t prefix = (size_t)(headpos - (char*)ASSET_INDEX_HTML);
+                        const char *css_fmt = "<link rel=\"stylesheet\" href=\"/skins/%s/styles.css\">";
+                        char css_inj[256]; snprintf(css_inj, sizeof(css_inj), css_fmt, active_skin);
+                        size_t csslen = strlen(css_inj);
+                        size_t newlen = ASSET_INDEX_HTML_LEN + csslen;
+                        char *nb = malloc(newlen);
+                        if (nb) {
+                            memcpy(nb, ASSET_INDEX_HTML, prefix);
+                            memcpy(nb + prefix, css_inj, csslen);
+                            memcpy(nb + prefix + csslen, ASSET_INDEX_HTML + prefix, ASSET_INDEX_HTML_LEN - prefix);
+                            send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
+                            free(nb);
+                            return;
+                        }
+                    }
+                }
+                // inject extra.js into compiled index (if allowed)
+                if (skin_has_file(active_skin, "extra.js") && skin_allows_extra_js(active_skin)) {
+                    const char *bodyneedle = "</body>";
+                    char *bodypos = memmem_shim(ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, bodyneedle, strlen(bodyneedle));
+                    if (bodypos) {
+                        size_t prefix = (size_t)(bodypos - (char*)ASSET_INDEX_HTML);
+                        const char *injection_fmt = "<script src=\"/skins/%s/extra.js\"></script>";
+                        char injection[256]; snprintf(injection, sizeof(injection), injection_fmt, active_skin);
+                        size_t injlen = strlen(injection);
+                        size_t newlen = ASSET_INDEX_HTML_LEN + injlen;
+                        char *nb = malloc(newlen);
+                        if (nb) {
+                            memcpy(nb, ASSET_INDEX_HTML, prefix);
+                            memcpy(nb + prefix, injection, injlen);
+                            memcpy(nb + prefix + injlen, ASSET_INDEX_HTML + prefix, ASSET_INDEX_HTML_LEN - prefix);
+                            send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
+                            free(nb);
+                            return; // served
+                        }
                     }
                 }
             }
@@ -1154,6 +1412,70 @@ void handle_http_request(int client_fd, const char *request) {
         build_skins_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
     }
+    else if (strcmp(path, "/api/skins/upload") == 0 && strcmp(method, "POST") == 0) {
+        const char *body_start = strstr(request, "\r\n\r\n");
+        if (!body_start) { send_http_response(client_fd, "400 Bad Request", "text/plain", "Missing body\n"); return; }
+        body_start += 4;
+        // Locate the archive JSON value and allocate an appropriately sized buffer so large uploads succeed
+        const char *k = strstr(body_start, "\"archive\"");
+        if (!k) { send_http_response(client_fd, "400 Bad Request", "text/plain", "Missing archive base64\n"); return; }
+        const char *col = strchr(k, ':'); if (!col) { send_http_response(client_fd, "400 Bad Request", "text/plain", "Invalid archive field\n"); return; }
+        const char *first_quote = strchr(col, '"'); if (!first_quote) { send_http_response(client_fd, "400 Bad Request", "text/plain", "Invalid archive payload\n"); return; }
+        first_quote++;
+        const char *end_quote = first_quote;
+        while (*end_quote && !(*end_quote == '"' && *(end_quote - 1) != '\\')) end_quote++;
+        if (*end_quote != '"') { send_http_response(client_fd, "400 Bad Request", "text/plain", "Invalid archive payload\n"); return; }
+        size_t b64_len = (size_t)(end_quote - first_quote);
+        // Upper bound for base64 length: decoded size must be <= 10MB
+        size_t max_decoded_est = (b64_len * 3) / 4 + 4;
+        if (max_decoded_est > 10 * 1024 * 1024) { send_http_response(client_fd, "413 Payload Too Large", "text/plain", "Payload too large\n"); return; }
+        char *b64 = malloc(b64_len + 1);
+        if (!b64) { send_http_response(client_fd, "500 Internal Server Error", "text/plain", "Memory allocation failed\n"); return; }
+        memcpy(b64, first_quote, b64_len);
+        b64[b64_len] = '\0';
+        size_t max_decoded = (b64_len * 3) / 4 + 4;
+        if (max_decoded > 10 * 1024 * 1024) { send_http_response(client_fd, "413 Payload Too Large", "text/plain", "Payload too large\n"); return; }
+        unsigned char *decoded = malloc(max_decoded);
+        if (!decoded) { send_http_response(client_fd, "500 Internal Server Error", "text/plain", "Memory allocation failed\n"); return; }
+        size_t dlen = 0;
+        if (base64_decode(b64, decoded, &dlen) != 0) { free(decoded); free(b64); send_http_response(client_fd, "400 Bad Request", "text/plain", "Invalid base64\n"); return; }
+        // Write to temp file
+        char tmpfile_template[] = "/tmp/burn2cool_skin_XXXXXX";
+        LOG_VERBOSE("upload_skin: created tmp template: %s\n", tmpfile_template);
+        int fd = mkstemp(tmpfile_template);
+        if (fd < 0) { send_http_response(client_fd, "500 Internal Server Error", "text/plain", "Failed to create temp file\n"); return; }
+        ssize_t w = write(fd, decoded, dlen);
+        close(fd);
+        if ((size_t)w != dlen) { unlink(tmpfile_template); LOG_ERROR("upload_skin: failed to write decoded file %s (w=%zd,dlen=%zu)\n", tmpfile_template, w, dlen); send_http_response(client_fd, "500 Internal Server Error", "text/plain", "Failed to write temp file\n"); return; }
+        LOG_VERBOSE("upload_skin: wrote temp file %s (decoded %zu bytes)\n", tmpfile_template, dlen);
+        // install
+        char installed_id[256] = {0};
+        if (install_skin_archive_from_file(tmpfile_template, installed_id, sizeof(installed_id)) != 0) {
+            LOG_ERROR("upload_skin: install_skin_archive_from_file failed for %s\n", tmpfile_template);
+            unlink(tmpfile_template);
+            send_http_response(client_fd, "500 Internal Server Error", "text/plain", "Skin install failed\n");
+            return;
+        }
+        // optionally activate if 'activate' flag is present
+        char activate_str[8] = {0};
+        if (extract_json_string(body_start, "\"activate\"", activate_str, sizeof(activate_str)) == 0) {
+            if (strcmp(activate_str, "true") == 0) {
+                strncpy(active_skin, installed_id, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0'; save_config_file();
+            }
+        }
+        free(decoded); free(b64);
+        unlink(tmpfile_template);
+        snprintf(response, sizeof(response), "{\"ok\":true,\"installed\":\"%s\"}", installed_id);
+        send_http_response(client_fd, "201 Created", "application/json", response);
+        return;
+    }
+    else if (strcmp(path, "/api/skins/default") == 0 && strcmp(method, "POST") == 0) {
+        // Reset to default (clear active skin)
+        active_skin[0] = '\0';
+        save_config_file();
+        snprintf(response, sizeof(response), "{\"ok\":true,\"active\":null}");
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
     else if (strncmp(path, "/api/skins/", 11) == 0 && strcmp(method, "POST") == 0) {
         // Expect POST /api/skins/<id>/activate
         const char *p = path + 11;
@@ -1172,8 +1494,34 @@ void handle_http_request(int client_fd, const char *request) {
                     snprintf(response, sizeof(response), "{\"ok\":true,\"active\":\"%s\"}", active_skin);
                     send_http_response(client_fd, "200 OK", "application/json", response);
                 }
+            } else if (strcmp(action, "deactivate") == 0) {
+                if (!skin_exists(id)) {
+                    send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
+                } else {
+                    if (strcmp(active_skin, id) == 0) {
+                        active_skin[0] = '\0'; save_config_file();
+                        snprintf(response, sizeof(response), "{\"ok\":true,\"active\":null}");
+                        send_http_response(client_fd, "200 OK", "application/json", response);
+                    } else {
+                        snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"skin not active\"}");
+                        send_http_response(client_fd, "400 Bad Request", "application/json", response);
+                    }
+                }
             } else {
-                send_http_response(client_fd, "400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"unknown action\"}");
+                if (strcmp(action, "remove") == 0) {
+                    // remove the skin directory from SKINS_DIR
+                    if (!skin_exists(id)) {
+                        send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
+                    } else {
+                        if (strcmp(active_skin, id) == 0) { active_skin[0] = '\0'; save_config_file(); }
+                        char cmdrem[1024]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, id);
+                        system(cmdrem);
+                        snprintf(response, sizeof(response), "{\"ok\":true,\"removed\":\"%s\"}", id);
+                        send_http_response(client_fd, "200 OK", "application/json", response);
+                    }
+                } else {
+                    send_http_response(client_fd, "400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"unknown action\"}");
+                }
             }
         }
     }
@@ -1505,12 +1853,38 @@ void handle_http_connections() {
             perror("accept");
             break;
         }
-        char buffer[4096];
-        ssize_t bytes = read(client_fd, buffer, sizeof(buffer) - 1);
-        if (bytes > 0) {
-            buffer[bytes] = '\0';
-            handle_http_request(client_fd, buffer);
+        // Read entire HTTP request into dynamically sized buffer. This handles
+        // larger POST bodies (skins upload) where the request may not fit into
+        // a single read() call.
+        size_t cap = 4096; size_t total = 0;
+        char *buffer = malloc(cap);
+        if (!buffer) { close(client_fd); continue; }
+        while (1) {
+            ssize_t bytes = read(client_fd, buffer + total, cap - total - 1);
+            if (bytes <= 0) break; // EOF or error
+            total += (size_t)bytes;
+            buffer[total] = '\0';
+            // If we have headers, try to determine Content-Length and stop when body is fully read
+            char *body_start = strstr(buffer, "\r\n\r\n");
+            if (body_start) {
+                size_t headers_len = (size_t)(body_start + 4 - buffer);
+                int content_len = 0;
+                const char *cl = strstr(buffer, "Content-Length:");
+                if (cl) { cl += strlen("Content-Length:"); while (*cl && isspace((unsigned char)*cl)) cl++; content_len = atoi(cl); }
+                if (content_len > 0) {
+                    if (total >= headers_len + (size_t)content_len) break; // whole body received
+                } else {
+                    // no content-length -> treat as complete request (typical for GET)
+                    break;
+                }
+            }
+            // grow buffer when required
+            if (cap - total < 4096) { cap *= 2; char *nb = realloc(buffer, cap); if (!nb) break; buffer = nb; }
         }
+        if (total > 0) {
+            buffer[total] = '\0'; handle_http_request(client_fd, buffer);
+        }
+        free(buffer);
         close(client_fd);
     }
 }
@@ -1733,6 +2107,50 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         }
                     }
                 }
+                else if (strcmp(cmd, "put-skin") == 0) {
+                    // Expect header: put-skin <name> <len>\n then raw bytes
+                    char sname[256] = {0}; size_t slen = 0; int hdr_len = 0;
+                    int parsed = sscanf(buffer, "%63s %255s %zu %n", cmd, sname, &slen, &hdr_len);
+                    if (parsed < 3) { snprintf(response, sizeof(response), "ERROR: invalid header\n"); }
+                    else {
+                        size_t body_start = (size_t)hdr_len;
+                        size_t have = total > body_start ? total - body_start : 0;
+                        if (slen > 50 * 1024 * 1024) { snprintf(response, sizeof(response), "ERROR: payload too large\n"); }
+                        else {
+                            // write raw payload to temp file
+                            char tmp_template[] = "/tmp/burn2cool_skin_XXXXXX.tar.gz";
+                            int fd = mkstemp(tmp_template);
+                            if (fd < 0) { snprintf(response, sizeof(response), "ERROR: cannot create tmp file\n"); }
+                            else {
+                                // write already-read bytes
+                                size_t written = 0;
+                                if (have > 0) {
+                                    ssize_t w = write(fd, buffer + body_start, have);
+                                    if (w < 0) { close(fd); unlink(tmp_template); snprintf(response, sizeof(response), "ERROR: write failed\n"); goto putskin_done; }
+                                    written += (size_t)w;
+                                }
+                                // read remaining
+                                while (written < slen) {
+                                    ssize_t r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                    if (r <= 0) { close(fd); unlink(tmp_template); snprintf(response, sizeof(response), "ERROR: receive failed\n"); goto putskin_done; }
+                                    ssize_t w = write(fd, buffer, r);
+                                    if (w < 0) { close(fd); unlink(tmp_template); snprintf(response, sizeof(response), "ERROR: write failed\n"); goto putskin_done; }
+                                    written += (size_t)w;
+                                }
+                                close(fd);
+                                // install
+                                char installed_id[256] = {0};
+                                if (install_skin_archive_from_file(tmp_template, installed_id, sizeof(installed_id)) != 0) {
+                                    snprintf(response, sizeof(response), "ERROR: install failed\n");
+                                } else {
+                                    snprintf(response, sizeof(response), "OK: installed %s\n", installed_id);
+                                }
+                                unlink(tmp_template);
+                            }
+                        }
+                    }
+                putskin_done: ;
+                }
                 else if (strcmp(cmd, "status") == 0) {
                     if (strcmp(arg, "json") == 0) {
                         build_status_json(response, sizeof(response));
@@ -1781,6 +2199,59 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         } else {
                             snprintf(response, sizeof(response), "ERROR: Cannot open profiles directory\n");
                         }
+                    }
+                }
+                else if (strcmp(cmd, "list-skins") == 0) {
+                    if (strcmp(arg, "json") == 0) {
+                        build_skins_json(response, sizeof(response));
+                    } else {
+                        DIR *d = opendir(SKINS_DIR);
+                        if (!d) {
+                            snprintf(response, sizeof(response), "ERROR: cannot open skins directory\n");
+                        } else {
+                            struct dirent *ent;
+                            char *ptr = response; size_t remaining = sizeof(response);
+                            while ((ent = readdir(d)) && remaining > 2) {
+                                if (ent->d_name[0] == '.') continue;
+                                char full[1024]; snprintf(full, sizeof(full), "%s/%s", SKINS_DIR, ent->d_name);
+                                struct stat st; if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+                                int written = snprintf(ptr, remaining, "%s\n", ent->d_name);
+                                if (written > 0 && (size_t)written < remaining) { ptr += written; remaining -= written; } else break;
+                            }
+                            closedir(d);
+                        }
+                    }
+                }
+                else if (strcmp(cmd, "activate-skin") == 0) {
+                    if (!skin_exists(arg)) {
+                        snprintf(response, sizeof(response), "ERROR: skin not found\n");
+                    } else {
+                        strncpy(active_skin, arg, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0';
+                        save_config_file();
+                        snprintf(response, sizeof(response), "OK: skin %s activated\n", active_skin);
+                    }
+                }
+                else if (strcmp(cmd, "deactivate-skin") == 0) {
+                    if (!skin_exists(arg)) {
+                        snprintf(response, sizeof(response), "ERROR: skin not found\n");
+                    } else {
+                        if (strcmp(active_skin, arg) == 0) {
+                            active_skin[0] = '\0'; save_config_file();
+                            snprintf(response, sizeof(response), "OK: skin %s deactivated\n", arg);
+                        } else {
+                            snprintf(response, sizeof(response), "ERROR: skin %s not active\n", arg);
+                        }
+                    }
+                }
+                else if (strcmp(cmd, "remove-skin") == 0) {
+                    if (!skin_exists(arg)) {
+                        snprintf(response, sizeof(response), "ERROR: skin not found\n");
+                    } else {
+                        // If this skin is active, clear it
+                        if (strcmp(active_skin, arg) == 0) { active_skin[0] = '\0'; save_config_file(); }
+                        char cmdrem[1024]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, arg);
+                        system(cmdrem);
+                        snprintf(response, sizeof(response), "OK: skin %s removed\n", arg);
                     }
                 }
                 else if (strcmp(cmd, "load-profile") == 0) {

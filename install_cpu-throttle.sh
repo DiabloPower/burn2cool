@@ -68,6 +68,9 @@ DEAMON_PATH="/usr/local/bin/$BINARY_NAME"
 DEAMON_CTL_PATH="/usr/local/bin/$CTL_BINARY_NAME"
 TUI_BUILD_PATH="/usr/local/bin/$TUI_BIN_NAME"
 
+# Path to config file (should match daemon's CONFIG_FILE)
+CONFIG_FILE="/etc/cpu_throttle.conf"
+
 SERVICE_PATH="/etc/systemd/system/$BINARY_NAME.service"
 BUILD_PATH="$DEAMON_PATH" # For compatibility with provided service template
 
@@ -164,6 +167,7 @@ while (( "$#" )); do
     --release-tag) RELEASE_TAG="${2:-}"; shift ;;
     --fetch-url) FETCH_URL="${2:-}"; shift ;;
     --quiet) QUIET=1 ;;
+    --install-skin) INSTALL_SKIN_ARCHIVE="${2:-}"; shift ;;
     --debug-install) DEBUG_INSTALL=1 ;;
     --web-port) WEB_ENABLE=1; WEB_PORT="${2:-}"; shift ;;
     --help|-h)
@@ -916,6 +920,46 @@ download_source_and_build() {
   fi
 }
 
+install_skin_archive() {
+  local archive="$1"
+  if [ -z "$archive" ]; then
+    err "No archive specified for skin installation"
+    return 1
+  fi
+  log "Installing skin from archive: $archive"
+  local staging="$WORK_DIR/skin_staging"
+  rm -rf "$staging" && mkdir -p "$staging"
+  case "$archive" in
+    *.tar.gz|*.tgz)
+      tar -xzf "$archive" -C "$staging" || { err "Failed to extract tar.gz"; return 1; } ;;
+    *.zip)
+      unzip -q "$archive" -d "$staging" || { err "Failed to extract zip"; return 1; } ;;
+    *)
+      err "Unknown archive type: $archive"; return 1 ;;
+  esac
+  # find manifest.json
+  local manifest
+  manifest=$(find "$staging" -maxdepth 3 -type f -name manifest.json | head -n1 || true)
+  if [ -z "$manifest" ]; then
+    err "manifest.json not found in skin archive"; return 1
+  fi
+  # read id from manifest (simple jq-free parse)
+  local skin_id
+  skin_id=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' "$manifest" | head -n1 || true)
+  if [ -z "$skin_id" ]; then
+    # fallback to directory name
+    skin_id=$(basename "$(dirname "$manifest")")
+  fi
+  local install_dir="/usr/local/share/burn2cool/skins/$skin_id"
+  sudo mkdir -p "$install_dir"
+  sudo rm -rf "$install_dir/"*
+  sudo cp -a "$staging/." "$install_dir/"
+  sudo chown -R root:root "$install_dir"
+  log "Skin installed to: $install_dir"
+  echo "$skin_id"
+  return 0
+}
+
 download_explicit_url() {
   local ext
   ext="${FETCH_URL##*.}"
@@ -1302,6 +1346,20 @@ EOF
     sudo mkdir -p /usr/local/share/burn2cool_tray
     sudo cp -r "$WORK_DIR/staging/assets" /usr/local/share/burn2cool_tray/ || warn "Failed to install GUI assets"
     sudo cp -r "$WORK_DIR/staging/i18n" /usr/local/share/burn2cool_tray/ || warn "Failed to install GUI i18n"
+  fi
+fi
+
+# If requested, install a skin archive
+if [ -n "${INSTALL_SKIN_ARCHIVE:-}" ]; then
+  log "Installer: installing skin from $INSTALL_SKIN_ARCHIVE"
+  installed_id="$(install_skin_archive "$INSTALL_SKIN_ARCHIVE")" || installed_id=""
+  if [ -n "$installed_id" ]; then
+    # set active skin in config (add or replace skin= line)
+    sudo sed -i '/^skin=/d' "$CONFIG_FILE" || true
+    sudo sh -c "printf '%s\n' \"skin=$installed_id\" >> \"$CONFIG_FILE\""
+    log "Activated installed skin: $installed_id"
+  else
+    warn "Skin installation failed"
   fi
 fi
 

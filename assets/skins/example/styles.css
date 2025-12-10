@@ -1,0 +1,13 @@
+/* Example Skin CSS: Minimal overrides (change the accent color to a different color) */
+:root { --accent: #7f5af0; }
+/* override default topbar accent */
+.topbar { background: rgba(127,90,240,0.12); }
+h1, h2 { color: var(--accent); }
+button { background: var(--accent); }
+.value { color: var(--accent); }
+/* keep other rules unchanged by using the existing selectors */
+/* Provide a small preview background for the skin previews */
+body { background: linear-gradient(180deg, #0f0f1a 0%, #191922 100%); }
+/* Example skin CSS */
+body { background-color: #222; color: #EEE; }
+.header { background: linear-gradient(#333,#111); }

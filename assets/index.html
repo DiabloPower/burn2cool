@@ -75,6 +75,7 @@
       </div>
       </div>
     <div id='toast'></div>
+    <!-- Floating button to open skins modal (non-intrusive floating action button) -->
     <div id='confirmModal' class='modal hidden'>
       <div class='modal-overlay'></div>
       <div class='modal-content'>
@@ -85,7 +86,46 @@
         </div>
       </div>
     </div>
-    <script>
+    <!-- Skins management modal: lists available skins, preview, and allows activation -->
+    <div id='skinsModal' class='modal hidden'>
+      <div class='modal-overlay' id='skinsOverlay'></div>
+      <div class='modal-content'>
+        <div class='modal-header'>
+          <div class='modal-row-title'>
+            <h3 class='modal-title'>Skins</h3>
+          </div>
+          <div class='modal-row-actions'>
+            <div class='header-left'>
+              <button id='skinsResetBtn' class='btn-secondary btn-icon' title='Revert to default' aria-label='Revert to default'>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                </svg>
+                <span>Default</span>
+              </button>
+              
+              <input type='file' id='skinFileInput' accept='.zip,.tgz,.tar,.gz,.tar.gz,.zip' class='hidden-file-input' aria-label='Choose skin archive file' />
+              <div class='install-group'>
+                <button id='skinsInstallBtn' class='btn-secondary' title='Install skin'>Install</button>
+                <progress id='skinUploadProgress' class='upload-progress' value='0' max='100'></progress>
+                <label class='install-activate'>
+                  <input type='checkbox' id='skinActivateAfterInstall' title='Activate after install' />
+                  <span>Activate after install</span>
+                </label>
+              </div>
+            </div>
+            <div class='header-right'>
+            </div>
+            <button id='skinsClose' class='btn-close' aria-label='Close skins modal'>×</button>
+          </div>
+        </div>
+        <div id='skinsContainer' class='skins-list'>
+          <!-- Items populated dynamically: .skin-card -->
+        </div>
+      </div>
+      </div>
+      <!-- Floating button to open skins modal (moved to end-of-body so on mobile it's rendered below content) -->
+      <button id="skinFab" class="fab" title="Manage skins">Skins</button>
+      <script>
       // Provide a global window.showConfirm fallback so code can call it before DOMContentLoaded
       if (typeof window.showConfirm !== 'function') {
         window.showConfirm = function(msg){ return new Promise((resolve)=>{ resolve(window.confirm(msg)); }); };
@@ -299,6 +339,135 @@
         });
         // No shutdown button in web UI — leaving shutdown operations out for safety
         setInterval(update,1000); update();
+        // Skins UI: open/close, fetch list and handle activate/preview
+        const skinFab = document.getElementById('skinFab');
+        const skinsModal = document.getElementById('skinsModal');
+        const skinsOverlay = document.getElementById('skinsOverlay');
+        const skinsClose = document.getElementById('skinsClose');
+        if (skinFab) skinFab.addEventListener('click', () => openSkinsModal());
+        if (skinsClose) skinsClose.addEventListener('click', () => closeSkinsModal());
+        if (skinsOverlay) skinsOverlay.addEventListener('click', () => closeSkinsModal());
+        const skinsResetBtn = document.getElementById('skinsResetBtn');
+        if (skinsResetBtn) skinsResetBtn.addEventListener('click', async ()=>{ if (await window.showConfirm('Revert to default assets?')) resetToDefault(); });
+        const skinsInstallBtn = document.getElementById('skinsInstallBtn');
+        const skinFileInput = document.getElementById('skinFileInput');
+        const skinActivateAfterInstall = document.getElementById('skinActivateAfterInstall');
+        if (skinsInstallBtn && skinFileInput) {
+          skinsInstallBtn.addEventListener('click', ()=>{ skinFileInput.click(); });
+          skinFileInput.addEventListener('change', async (e)=>{
+            const f = e.target.files && e.target.files[0]; if(!f) return; const activate = skinActivateAfterInstall && skinActivateAfterInstall.checked;
+            await installSkin(f, activate);
+            // clear the input value so change events fire again for same file
+            skinFileInput.value = '';
+          });
+        }
+
+        function openSkinsModal(){
+          refreshSkinsList();
+          skinsModal.classList.remove('hidden');
+        }
+        function closeSkinsModal(){
+          skinsModal.classList.add('hidden');
+        }
+        function refreshSkinsList(){
+          fetch('/api/skins').then(r=>r.json()).then(data=>{
+            const container = document.getElementById('skinsContainer');
+            container.innerHTML = '';
+            const list = (data && data.skins) ? data.skins : [];
+            if(list.length === 0){ container.innerHTML = '<div style="padding:12px;color:#bbb">No skins installed</div>'; return; }
+            list.forEach(s => {
+              const card = document.createElement('div'); card.className = 'skin-card';
+              card.style.width = '220px'; card.style.background='#111'; card.style.border='1px solid #333'; card.style.borderRadius='8px'; card.style.padding='8px'; card.style.boxSizing='border-box';
+              const title = document.createElement('div'); title.textContent = s.name || s.id; title.style.fontWeight='600'; title.style.marginBottom='6px'; title.style.color='#fff';
+              const preview = document.createElement('img'); preview.src = '/skins/'+encodeURIComponent(s.id)+'/preview.png'; preview.alt = s.name || s.id; preview.style.width='100%'; preview.style.maxHeight='120px'; preview.style.objectFit='cover'; preview.style.borderRadius='4px'; preview.style.background='#222';
+              const meta = document.createElement('div'); meta.style.marginTop='8px'; meta.style.display='flex'; meta.style.gap='6px'; meta.style.justifyContent='space-between';
+              const allowJS = document.createElement('span'); allowJS.textContent = s.allow_extra_js ? 'Extra JS allowed' : ''; allowJS.style.color = s.allow_extra_js ? '#28a745' : '#999'; allowJS.style.fontSize='0.85em';
+              const actions = document.createElement('div'); actions.className = 'skin-actions';
+              const toggleBtn = document.createElement('button');
+              toggleBtn.textContent = s.active ? 'Deactivate' : 'Activate';
+              toggleBtn.className = 'skin-action-btn';
+              if (s.active) toggleBtn.classList.add('active');
+              if (s.active) { toggleBtn.addEventListener('click', ()=>{ deactivateSkin(s.id); }); card.style.borderColor = '#28a745'; }
+              else { toggleBtn.addEventListener('click', ()=>{ activateSkin(s.id); }); }
+              actions.appendChild(toggleBtn);
+              // Add remove button
+              const removeBtn = document.createElement('button');
+              removeBtn.textContent = 'Remove';
+              removeBtn.className = 'btn-danger skin-action-btn';
+              removeBtn.addEventListener('click', async ()=>{ if(await window.showConfirm('Remove skin '+s.id+'?')) removeSkin(s.id); });
+              actions.appendChild(removeBtn);
+              card.appendChild(title); card.appendChild(preview); meta.appendChild(allowJS); meta.appendChild(actions); card.appendChild(meta);
+              container.appendChild(card);
+            });
+          }).catch(e=>{ console.log('Failed to fetch skins', e); const container = document.getElementById('skinsContainer'); container.innerHTML = '<div style="padding:12px;color:#ddd">Failed to query skins</div>'; });
+        }
+        function deactivateSkin(id){
+          fetch('/api/skins/'+encodeURIComponent(id)+'/deactivate', {method:'POST'}).then(r=>{
+            if(r.ok) { showToast('Deactivated '+id+'', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Deactivation failed', 'error'); }
+          }).catch(e=>{ showToast('Deactivation error', 'error'); console.log(e); });
+        }
+        function resetToDefault(){
+          fetch('/api/skins/default', {method:'POST'}).then(r=>{
+            if(r.ok){ showToast('Reverted to default', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Failed to revert', 'error'); }
+          }).catch(e=>{ showToast('Failed to revert', 'error'); console.log(e); });
+        }
+        function activateSkin(id){
+          fetch('/api/skins/'+encodeURIComponent(id)+'/activate', {method:'POST'}).then(r=>{
+            if(r.ok) { showToast('Activated '+id+'', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Activation failed', 'error'); }
+          }).catch(e=>{ showToast('Activation error', 'error'); console.log(e); });
+        }
+        // Install a skin file (tar/gzip/zip) - encode to base64 and send to server
+        async function installSkin(file, activate=false){
+          try{
+            // server enforces max decoded size about 10MB; let's block larger files early
+            if (file.size > 15 * 1024 * 1024) { showToast('File too large (>15MB)', 'error'); return; }
+            const arr = await new Promise((resolve,reject)=>{ const fr = new FileReader(); fr.onerror = ()=>reject(fr.error); fr.onload = ()=>resolve(fr.result); fr.readAsArrayBuffer(file); });
+            // convert arraybuffer to base64
+            const bytes = new Uint8Array(arr);
+            let binary = '';
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+              binary += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes.subarray(i, Math.min(i + chunk, bytes.length))));
+            }
+            const b64 = btoa(binary);
+            const bodyObj = { archive: b64 };
+            if (activate) bodyObj.activate = "true";
+            // Use XHR so we can track upload progress reliably
+            const progressEl = document.getElementById('skinUploadProgress');
+            progressEl.value = 0; progressEl.style.display = 'inline-block';
+            showToast('Uploading skin...','success');
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/skins/upload');
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.upload.onprogress = function(e){
+              if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressEl.value = pct;
+              }
+            };
+            const payload = JSON.stringify(bodyObj);
+            const prom = new Promise((resolve, reject) => {
+              xhr.onload = function(){
+                progressEl.style.display = 'none';
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  try{ const res = JSON.parse(xhr.responseText); resolve({ok:true, body: res}); } catch(e){ resolve({ok:true, body: null}); }
+                } else { resolve({ok:false, status: xhr.status, body: xhr.responseText}); }
+              };
+              xhr.onerror = function(){ progressEl.style.display = 'none'; reject(new Error('Upload failed')); };
+            });
+            xhr.send(payload);
+            const resp = await prom;
+            if (!resp.ok) { showToast('Upload failed', 'error'); return; }
+            const j = resp.body; if (j && j.installed) { showToast('Installed '+j.installed, 'success'); setTimeout(()=>{ refreshSkinsList(); closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Install failed', 'error'); }
+          } catch (e){ console.log('installSkin error', e); showToast('Install error', 'error'); }
+        }
+        async function removeSkin(id){
+          try{
+            const resp = await fetch('/api/skins/'+encodeURIComponent(id)+'/remove', {method:'POST'});
+            if (resp.ok) { showToast('Removed '+id, 'success'); setTimeout(()=>{ refreshSkinsList(); closeSkinsModal(); window.location.reload(); }, 350); }
+            else { showToast('Failed to remove skin', 'error'); }
+          } catch(e){ console.log('removeSkin error', e); showToast('Failed to remove skin', 'error'); }
+        }
       });
     </script>
   </body>

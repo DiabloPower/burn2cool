@@ -51,6 +51,7 @@ Files in this repo
 - `cpu_throttle_ctl.c` — control utility source
 - `cpu_throttle_tui.c` — optional ncurses TUI source
 - `install_cpu-throttle.sh` — installer script (builds/installs and sets up service)
+- `install_cpu-throttle.sh` — installer script (builds/installs and sets up service); supports `--install-skin <archive>` to install a system skin and activate it
 - `Makefile`, `assets/`, `include/`
 
 ---
@@ -107,6 +108,7 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
 --safe-max <freq>      Maximum frequency limit in kHz
 --temp-max <temp>      Maximum temperature threshold in °C (default: 95, range: 50-110)
 --help                 Show help message
+--install-skin <file>  Install a skin archive (tar.gz or zip) and activate it system-wide
 ```
 
 ---
