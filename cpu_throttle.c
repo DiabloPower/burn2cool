@@ -50,6 +50,16 @@ int thermal_zone = -1; // thermal zone number (-1 = auto-detect, prefer zone 0 i
 int use_avg_temp = 0; // use average temperature from CPU thermal zones
 int last_throttle_temp = 0; // hysteresis for throttling
 
+/* System-wide skins directory. Skins are installed system-wide by installer or
+ * manually by an administrator. Each subfolder is one skin (id = folder name). */
+const char *SKINS_DIR = "/usr/local/share/burn2cool/skins";
+/* Assets directory: default path to serve static assets. */
+const char *ASSETS_DIR = "assets";
+
+/* Active skin id (matches a subdirectory name under SKINS_DIR). Empty string
+ * means use default embedded assets. */
+char active_skin[256] = "";
+
 // Zone entry representation for JSON generation and sorting
 typedef struct zone_entry { int zone_num; char type[256]; int temp_c; } zone_entry_t;
 
@@ -102,10 +112,54 @@ char **saved_argv = NULL;
 #else /* !USE_ASSET_HEADERS */
 /* Assets directory: default path to serve static assets. */
 const char *ASSETS_DIR = "assets";
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long len = ftell(fp);
+    if (len < 0) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = malloc(len + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t r = fread(buf, 1, len, fp);
+    fclose(fp);
+    buf[r] = '\0';
+    if (out_len) *out_len = r;
+    return buf;
+}
 
-/* Helper: when compiled without asset headers, read a file from disk and
- * return its content (dynamically allocated). Caller must free() the
- * returned buffer. Returns NULL on failure. */
+    
+
+/* forward declaration for send_http_response_len to avoid implicit declaration
+ * when file-serving helper is compiled earlier than the response function. */
+void send_http_response_len(int client_fd, const char *status, const char *content_type, const void *body, size_t len, const char *extra_headers);
+/* forward declaration for guess_mime for use by serve_file */
+static const char *guess_mime(const char *path);
+
+#endif /* USE_ASSET_HEADERS */
+#ifndef ASSET_MAIN_JS
+#define ASSET_MAIN_JS assets_main_js
+#define ASSET_MAIN_JS_LEN assets_main_js_len
+#endif
+#ifndef ASSET_STYLES_CSS
+#define ASSET_STYLES_CSS assets_styles_css
+#define ASSET_STYLES_CSS_LEN assets_styles_css_len
+#endif
+#ifndef ASSET_FAVICON
+#define ASSET_FAVICON assets_favicon_ico
+#define ASSET_FAVICON_LEN assets_favicon_ico_len
+#endif
+
+// Logging macros (use __VA_ARGS__ form to satisfy pedantic compilers)
+#define LOG_ERROR(...) do { if (log_level >= LOGLEVEL_QUIET) fprintf(stderr, __VA_ARGS__); } while(0)
+#define LOG_INFO(...) do { if (log_level >= LOGLEVEL_NORMAL) printf(__VA_ARGS__); } while(0)
+#define LOG_VERBOSE(...) do { if (log_level >= LOGLEVEL_VERBOSE) printf(__VA_ARGS__); } while(0)
+
+void signal_handler(int sig) {
+    (void)sig;
+    should_exit = 1;
+}
+
+/* Read a file from disk and return allocated buffer (caller must free()) */
 static char *read_file_alloc(const char *path, size_t *out_len) {
     FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
@@ -131,48 +185,76 @@ static const char *guess_mime(const char *path){
     return "application/octet-stream";
 }
 
-/* forward declaration for send_http_response_len to avoid implicit declaration
- * when file-serving helper is compiled earlier than the response function. */
-void send_http_response_len(int client_fd, const char *status, const char *content_type, const void *body, size_t len, const char *extra_headers);
-
-/* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served,
- * 0 if not found, -1 on error. Only compiled when USE_ASSET_HEADERS is not
- * defined (i.e. when we don't have embedded headers). */
-static int serve_asset_from_disk(int client_fd, const char *relpath) {
-    char path[1024];
-    snprintf(path, sizeof(path), "%s%s", ASSETS_DIR, relpath);
+/* Read a file from disk and send as HTTP response (content length known).
+ * Returns 1 on success (served), 0 if not found, -1 on error. */
+static int serve_file(int client_fd, const char *path) {
     size_t len; char *buf = read_file_alloc(path, &len);
-    if (!buf) return 0; /* not found or could not read */
-    const char *mime = guess_mime(relpath);
-    /* We simply forward bytes as the body (no chunking). The same function
-     * handles blobs (image/ and others) and text. Ensure send_http_response_len
-     * is declared prior to this call. */
+    if (!buf) return 0;
+    const char *mime = guess_mime(path);
     send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
     free(buf);
     return 1;
 }
-#endif /* USE_ASSET_HEADERS */
-#ifndef ASSET_MAIN_JS
-#define ASSET_MAIN_JS assets_main_js
-#define ASSET_MAIN_JS_LEN assets_main_js_len
-#endif
-#ifndef ASSET_STYLES_CSS
-#define ASSET_STYLES_CSS assets_styles_css
-#define ASSET_STYLES_CSS_LEN assets_styles_css_len
-#endif
-#ifndef ASSET_FAVICON
-#define ASSET_FAVICON assets_favicon_ico
-#define ASSET_FAVICON_LEN assets_favicon_ico_len
-#endif
 
-// Logging macros (use __VA_ARGS__ form to satisfy pedantic compilers)
-#define LOG_ERROR(...) do { if (log_level >= LOGLEVEL_QUIET) fprintf(stderr, __VA_ARGS__); } while(0)
-#define LOG_INFO(...) do { if (log_level >= LOGLEVEL_NORMAL) printf(__VA_ARGS__); } while(0)
-#define LOG_VERBOSE(...) do { if (log_level >= LOGLEVEL_VERBOSE) printf(__VA_ARGS__); } while(0)
+static int skin_has_file(const char *skin_id, const char *relpath) {
+    if (!skin_id || !skin_id[0]) return 0;
+    char path[1024];
+    const char *r = relpath[0] == '/' ? relpath + 1 : relpath;
+    snprintf(path, sizeof(path), "%s/%s/%s", SKINS_DIR, skin_id, r);
+    struct stat st; return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
+}
 
-void signal_handler(int sig) {
-    (void)sig;
-    should_exit = 1;
+/* Serve HTML from disk/path and inject skin extra.js script if the active
+ * skin has extra.js. */
+static int serve_file_with_skin_extra(int client_fd, const char *path, const char *skin_id) {
+    size_t len; char *buf = read_file_alloc(path, &len);
+    if (!buf) return 0;
+    if (skin_id && skin_id[0] && skin_has_file(skin_id, "extra.js")) {
+        const char *script = "<script src=\"/skins/"; char injection[512];
+        snprintf(injection, sizeof(injection), "<script src=\"/skins/%s/extra.js\"></script>", skin_id);
+        // Find last </body> occurrence to inject before
+        char *pos = NULL; char *p = strstr(buf, "</body>");
+        if (p) pos = p; else pos = NULL;
+        if (pos) {
+            size_t newlen = len + strlen(injection);
+            char *nb = malloc(newlen + 1);
+            if (nb) {
+                size_t prefix = pos - buf;
+                memcpy(nb, buf, prefix);
+                memcpy(nb + prefix, injection, strlen(injection));
+                memcpy(nb + prefix + strlen(injection), pos, len - prefix);
+                nb[newlen] = '\0';
+                send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
+                free(nb);
+                free(buf);
+                return 1;
+            }
+        }
+    }
+    // No injection or failed, send raw
+    const char *mime = guess_mime(path);
+    send_http_response_len(client_fd, "200 OK", mime, buf, len, NULL);
+    free(buf);
+    return 1;
+}
+
+/* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served,
+ * 0 if not found, -1 on error. */
+static int serve_asset_from_disk(int client_fd, const char *relpath) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s%s", ASSETS_DIR, relpath);
+    return serve_file(client_fd, path);
+}
+
+/* Serve an asset from the active skin if present; returns 1 if served, 0
+ * if not found. */
+static int serve_skin_asset(int client_fd, const char *skin_id, const char *relpath) {
+    if (!skin_id || !skin_id[0]) return 0;
+    char path[1024];
+    // remove leading slash if present in relpath
+    const char *r = relpath[0] == '/' ? relpath + 1 : relpath;
+    snprintf(path, sizeof(path), "%s/%s/%s", SKINS_DIR, skin_id, r);
+    return serve_file(client_fd, path);
 }
 
 void cleanup_socket() {
@@ -244,6 +326,10 @@ void load_config_file() {
             } else if (strcmp(key, "web_port") == 0) {
                 web_port = atoi(value);
                 LOG_VERBOSE("Config: web_port = %d\n", web_port);
+            } else if (strcmp(key, "skin") == 0) {
+                strncpy(active_skin, value, sizeof(active_skin)-1);
+                active_skin[sizeof(active_skin)-1] = '\0';
+                LOG_VERBOSE("Config: active skin = %s\n", active_skin);
             } else if (strcmp(key, "excluded_types") == 0) {
                 strncpy(excluded_types_config, value, sizeof(excluded_types_config)-1);
                 excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
@@ -271,10 +357,57 @@ void save_config_file() {
     fprintf(fp, "thermal_zone=%d\n", thermal_zone);
     fprintf(fp, "avg_temp=%d\n", use_avg_temp);
     fprintf(fp, "web_port=%d\n", web_port);
+    fprintf(fp, "skin=%s\n", active_skin);
     fprintf(fp, "excluded_types=%s\n", excluded_types_config);
     
     fclose(fp);
     LOG_INFO("Configuration saved to %s\n", CONFIG_FILE);
+}
+
+// Check whether a skin directory exists under SKINS_DIR
+static int skin_exists(const char *id) {
+    if (!id || !id[0]) return 0;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", SKINS_DIR, id);
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return 1;
+    return 0;
+}
+
+// Primitive manifest parsing: look for "name" or "id" keys
+static void parse_skin_manifest(const char *manifest_path, char *out_id, size_t id_sz, char *out_name, size_t name_sz, int *allow_extra_js) {
+    out_id[0] = '\0'; out_name[0] = '\0'; if (allow_extra_js) *allow_extra_js = 0;
+    FILE *fp = fopen(manifest_path, "r"); if (!fp) return;
+    char buf[4096]; size_t r = fread(buf, 1, sizeof(buf)-1, fp); buf[r] = '\0'; fclose(fp);
+    // crude parsing
+    char *p = strstr(buf, "\"id\"");
+    if (p) { char *q = strchr(p, ':'); if (q) { char *s = strchr(q, '"'); if (s) { s++; char *e = strchr(s, '"'); if (e) { size_t len = e - s; if (len >= id_sz) len = id_sz - 1; memcpy(out_id, s, len); out_id[len] = '\0'; } } } }
+    p = strstr(buf, "\"name\"");
+    if (p) { char *q = strchr(p, ':'); if (q) { char *s = strchr(q, '"'); if (s) { s++; char *e = strchr(s, '"'); if (e) { size_t len = e - s; if (len >= name_sz) len = name_sz - 1; memcpy(out_name, s, len); out_name[len] = '\0'; } } } }
+    if (allow_extra_js) { p = strstr(buf, "\"allow_extra_js\""); if (p) { char *q = strchr(p, ':'); if (q) { while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == ':') q++; if (strncmp(q, "true", 4) == 0) *allow_extra_js = 1; } } }
+}
+
+void build_skins_json(char *buf, size_t bufsz) {
+    char tmp[4096]; size_t used = 0;
+    DIR *d = opendir(SKINS_DIR); if (!d) { snprintf(buf, bufsz, "{\"skins\":[]}"); return; }
+    struct dirent *ent; used += snprintf(tmp + used, sizeof(tmp) - used, "{\"skins\":["); int first = 1;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        // ensure it's a directory
+        char path[1024]; snprintf(path, sizeof(path), "%s/%s", SKINS_DIR, ent->d_name);
+        struct stat st; if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        char manifest_path[1024]; snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", path);
+        char id[256]; char name[256]; int allow_js = 0; parse_skin_manifest(manifest_path, id, sizeof(id), name, sizeof(name), &allow_js);
+        if (!id[0]) strncpy(id, ent->d_name, sizeof(id)-1);
+        if (!name[0]) strncpy(name, id, sizeof(name)-1);
+        if (!first) used += snprintf(tmp + used, sizeof(tmp) - used, ",");
+        used += snprintf(tmp + used, sizeof(tmp) - used, "{\"id\":\"%s\",\"name\":\"%s\",\"allow_extra_js\":%s}", id, name, allow_js ? "true" : "false");
+        first = 0;
+        if (used + 200 > sizeof(tmp)) break;
+    }
+    closedir(d);
+    used += snprintf(tmp + used, sizeof(tmp) - used, "]}");
+    if (used >= bufsz) { snprintf(buf, bufsz, "{\"skins\":[]}"); } else { strcpy(buf, tmp); }
 }
 
 int read_avg_cpu_temp(void);
@@ -284,7 +417,7 @@ void set_thermal_zone_path(int zone);
 static int is_excluded_thermal_type(const char *lower_type) {
     if (!lower_type) return 0;
     // Check configured excluded types first (comma separated list)
-    if (excluded_types_config && excluded_types_config[0]) {
+    if (excluded_types_config[0]) {
         char tmp[512];
         strncpy(tmp, excluded_types_config, sizeof(tmp)-1);
         tmp[sizeof(tmp)-1] = '\0';
@@ -558,8 +691,10 @@ void build_zones_json(char *buffer, size_t size) {
             if (is_excluded_thermal_type(lower_type)) excluded = 1;
             if (zcount < (int)(sizeof(zones) / sizeof(zones[0]))) {
                 zones[zcount].zone_num = zone_num;
-                strncpy(zones[zcount].type, type, sizeof(zones[zcount].type)-1);
-                zones[zcount].type[sizeof(zones[zcount].type)-1] = '\0';
+                size_t copy_len = strlen(type);
+                if (copy_len >= sizeof(zones[zcount].type)) copy_len = sizeof(zones[zcount].type)-1;
+                memcpy(zones[zcount].type, type, copy_len);
+                zones[zcount].type[copy_len] = '\0';
                 zones[zcount].temp_c = temp_c;
                 // mark excluded by negating temp to -100 to signal it for JSON (special value)
                 if (excluded) zones[zcount].temp_c = -12345;
@@ -921,9 +1056,28 @@ void handle_http_request(int client_fd, const char *request) {
     LOG_VERBOSE("HTTP %s %s\n", method, path);
     
     char response[2048];
+    // Serve skin files under /skins/<id>/<file>
+    if (strncmp(path, "/skins/", 7) == 0) {
+        const char *p = path + 7;
+        const char *slash = strchr(p, '/');
+        if (slash) {
+            char sid[256] = {0}; size_t len = (size_t)(slash - p); if (len >= sizeof(sid)) len = sizeof(sid)-1; memcpy(sid, p, len); sid[len] = '\0';
+            const char *rel = slash + 1; // e.g., "extra.js"
+            if (strcmp(rel, "extra.js") == 0 || strcmp(rel, "styles.css") == 0 || strcmp(rel, "index.html") == 0 || strcmp(rel, "favicon.ico") == 0 || strcmp(rel, "preview.png") == 0) {
+                if (skin_has_file(sid, rel)) {
+                    char pathbuf[1024]; snprintf(pathbuf, sizeof(pathbuf), "%s/%s/%s", SKINS_DIR, sid, rel);
+                    serve_file(client_fd, pathbuf);
+                    return;
+                }
+            }
+        }
+        send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
+        return;
+    }
     
     // Serve bundled static assets
                 if (strcmp(path, "/favicon.ico") == 0) {
+                    if (active_skin[0] && serve_skin_asset(client_fd, active_skin, "/favicon.ico")) return;
             #ifdef USE_ASSET_HEADERS
                 send_http_response_len(client_fd, "200 OK", "image/x-icon", ASSET_FAVICON, ASSET_FAVICON_LEN, NULL);
             #else
@@ -943,6 +1097,7 @@ void handle_http_request(int client_fd, const char *request) {
                 return;
                 }
             if (strcmp(path, "/styles.css") == 0) {
+                if (active_skin[0] && serve_skin_asset(client_fd, active_skin, "/styles.css")) return;
         #ifdef USE_ASSET_HEADERS
             send_http_response_len(client_fd, "200 OK", "text/css", ASSET_STYLES_CSS, ASSET_STYLES_CSS_LEN, NULL);
         #else
@@ -954,10 +1109,32 @@ void handle_http_request(int client_fd, const char *request) {
 
     // Route API requests
         if (strcmp(path, "/") == 0) {
+                if (active_skin[0] && serve_skin_asset(client_fd, active_skin, "/index.html")) return;
         #ifdef USE_ASSET_HEADERS
+            if (active_skin[0] && skin_has_file(active_skin, "extra.js")) {
+                // inject extra.js into compiled index
+                const char *needle = "</body>";
+                char *bodypos = memmem(ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, needle, strlen(needle));
+                if (bodypos) {
+                    size_t prefix = (size_t)(bodypos - (char*)ASSET_INDEX_HTML);
+                    const char *injection_fmt = "<script src=\"/skins/%s/extra.js\"></script>";
+                    char injection[256]; snprintf(injection, sizeof(injection), injection_fmt, active_skin);
+                    size_t injlen = strlen(injection);
+                    size_t newlen = ASSET_INDEX_HTML_LEN + injlen;
+                    char *nb = malloc(newlen);
+                    if (nb) {
+                        memcpy(nb, ASSET_INDEX_HTML, prefix);
+                        memcpy(nb + prefix, injection, injlen);
+                        memcpy(nb + prefix + injlen, ASSET_INDEX_HTML + prefix, ASSET_INDEX_HTML_LEN - prefix);
+                        send_http_response_len(client_fd, "200 OK", "text/html", nb, newlen, NULL);
+                        free(nb);
+                        return; // served
+                    }
+                }
+            }
             send_http_response_len(client_fd, "200 OK", "text/html", ASSET_INDEX_HTML, ASSET_INDEX_HTML_LEN, NULL);
         #else
-            if (serve_asset_from_disk(client_fd, "/index.html")) return;
+            if (serve_file_with_skin_extra(client_fd, "assets/index.html", active_skin)) return;
             send_http_response(client_fd, "404 Not Found", "text/plain", "Not found");
         #endif
             }
@@ -972,6 +1149,33 @@ void handle_http_request(int client_fd, const char *request) {
     else if (strcmp(path, "/api/zones") == 0 && strcmp(method, "GET") == 0) {
         build_zones_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
+    }
+    else if (strcmp(path, "/api/skins") == 0 && strcmp(method, "GET") == 0) {
+        build_skins_json(response, sizeof(response));
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
+    else if (strncmp(path, "/api/skins/", 11) == 0 && strcmp(method, "POST") == 0) {
+        // Expect POST /api/skins/<id>/activate
+        const char *p = path + 11;
+        const char *slash = strchr(p, '/');
+        if (!slash) { send_http_response(client_fd, "400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"invalid skins route\"}"); }
+        else {
+            char id[256]; size_t idlen = (size_t)(slash - p); if (idlen >= sizeof(id)) idlen = sizeof(id)-1; memcpy(id, p, idlen); id[idlen] = '\0';
+            const char *action = slash + 1;
+            if (strcmp(action, "activate") == 0) {
+                if (!skin_exists(id)) {
+                    send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
+                } else {
+                    // activate skin
+                    strncpy(active_skin, id, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0';
+                    save_config_file();
+                    snprintf(response, sizeof(response), "{\"ok\":true,\"active\":\"%s\"}", active_skin);
+                    send_http_response(client_fd, "200 OK", "application/json", response);
+                }
+            } else {
+                send_http_response(client_fd, "400 Bad Request", "application/json", "{\"ok\":false,\"error\":\"unknown action\"}");
+            }
+        }
     }
     else if (strcmp(path, "/api/daemon/version") == 0 && strcmp(method, "GET") == 0) {
         snprintf(response, sizeof(response), "{\"version\":\"%s\"}", DAEMON_VERSION);
@@ -1421,13 +1625,13 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     snprintf(response, sizeof(response), "OK: use_avg_temp set to %d\n", use_avg_temp);
                 }
                 else if (strcmp(cmd, "set-excluded-types") == 0) {
-                    if (arg && arg[0]) {
+                    if (arg[0]) {
                         // store lower-case list
                         for (char *p = arg; *p; ++p) *p = tolower(*p);
                         strncpy(excluded_types_config, arg, sizeof(excluded_types_config)-1);
                         excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
                         save_config_file();
-                        snprintf(response, sizeof(response), "OK: excluded types set to %s\n", excluded_types_config);
+                        snprintf(response, sizeof(response), "OK: excluded types set to %.480s\n", excluded_types_config);
                     } else {
                         snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
                     }
