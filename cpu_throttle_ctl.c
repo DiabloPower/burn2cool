@@ -8,11 +8,59 @@
 #include <sys/types.h>
 #include <pwd.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define SOCKET_PATH "/tmp/cpu_throttle.sock"
 
 char* get_profile_dir() {
     return "/var/lib/cpu_throttle/profiles";
+}
+
+static int has_local_cmd(const char *name) {
+    char buf[128];
+    int rc;
+    snprintf(buf, sizeof(buf), "command -v %s >/dev/null 2>&1", name);
+    rc = system(buf);
+    return rc == 0;
+}
+
+// Attempt to pretty-print JSON using common tools (jq, python3 json.tool).
+// If not available or formatting fails, fall back to printing the raw JSON.
+static void print_json_pretty_or_raw(const char *json) {
+    char tmp_template[] = "/tmp/cpu_throttle_ctl_json_XXXXXX";
+    int fd = mkstemp(tmp_template);
+    if (fd < 0) { printf("%s\n", json); return; }
+    // write the JSON to the temp file
+    size_t jlen = strlen(json);
+    ssize_t w = write(fd, json, jlen);
+    close(fd);
+    if (w < 0) { printf("%s\n", json); unlink(tmp_template); return; }
+
+    char cmd[512]; FILE *pf = NULL;
+    if (has_local_cmd("jq")) {
+        snprintf(cmd, sizeof(cmd), "jq -C . %s", tmp_template);
+        pf = popen(cmd, "r");
+    } else if (has_local_cmd("python3")) {
+        snprintf(cmd, sizeof(cmd), "python3 -m json.tool %s", tmp_template);
+        pf = popen(cmd, "r");
+    }
+    if (!pf) {
+        printf("%s\n", json);
+        unlink(tmp_template);
+        return;
+    }
+    // Read and print formatter output
+    char buf[4096]; size_t nread;
+    while ((nread = fread(buf, 1, sizeof(buf), pf)) > 0) {
+        fwrite(buf, 1, nread, stdout);
+    }
+    int rc = pclose(pf);
+    if (rc != 0) {
+        // fallback to raw JSON if formatter failed
+        printf("%s\n", json);
+    }
+    unlink(tmp_template);
 }
 
 void ensure_profile_dir() {
@@ -478,10 +526,12 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(argv[2], "list") == 0) {
             // Optional 'json' argument to request JSON output
-                if (argc >= 4 && (strcmp(argv[3], "json") == 0 || strcmp(argv[3], "--json") == 0 || strcmp(argv[3], "-j") == 0)) {
-                char *resp = send_command_get_response("list-skins json");
+                    int pretty_flag = 0;
+                    if (argc >= 4 && (strcmp(argv[3], "--pretty") == 0 || strcmp(argv[3], "-p") == 0)) pretty_flag = 1;
+                    if (argc >= 4 && (strcmp(argv[3], "json") == 0 || strcmp(argv[3], "--json") == 0 || strcmp(argv[3], "-j") == 0 || pretty_flag)) {
+                        char *resp = send_command_get_response("list-skins json");
                 if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
-                printf("%s", resp);
+                        if (pretty_flag) print_json_pretty_or_raw(resp); else printf("%s", resp);
                 free(resp);
                 return 0;
             }
@@ -531,6 +581,13 @@ int main(int argc, char *argv[]) {
         }
         else if (strcmp(argv[2], "remove") == 0) {
             if (argc < 4) { fprintf(stderr, "Error: skin id required for 'skins remove'\n"); return 1; }
+            int skip_confirm = 0;
+            if (argc >= 5 && (strcmp(argv[4], "--yes") == 0 || strcmp(argv[4], "-y") == 0)) skip_confirm = 1;
+            if (!skip_confirm) {
+                printf("Confirm remove skin '%s'? [y/N] ", argv[3]); fflush(stdout);
+                char ans[8]; if (!fgets(ans, sizeof(ans), stdin)) return 1;
+                if (!(ans[0] == 'y' || ans[0] == 'Y')) { printf("Aborting.\n"); return 1; }
+            }
             char cmd[256]; snprintf(cmd, sizeof(cmd), "remove-skin %s", argv[3]);
             return send_command(cmd);
         }
@@ -543,19 +600,22 @@ int main(int argc, char *argv[]) {
     // status/limits/zones commands: support optional --json/-j or --pretty/-p
     if (strcmp(argv[1], "status") == 0) {
         if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
-            char *resp = send_command_get_response("status json"); if (!resp) { fprintf(stderr, "Error: failed to query status\n"); return 1; } printf("%s", resp); free(resp); return 0;
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("status json"); if (!resp) { fprintf(stderr, "Error: failed to query status\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s", resp); free(resp); return 0;
         }
         return send_command("status");
     }
     if (strcmp(argv[1], "limits") == 0) {
         if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
-            char *resp = send_command_get_response("limits json"); if (!resp) { fprintf(stderr, "Error: failed to query limits\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("limits json"); if (!resp) { fprintf(stderr, "Error: failed to query limits\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
         }
         return send_command("limits");
     }
     if (strcmp(argv[1], "zones") == 0) {
         if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
-            char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
         }
         return send_command("zones");
     }
