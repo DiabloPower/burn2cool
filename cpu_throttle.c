@@ -1275,6 +1275,26 @@ static int extract_json_string(const char *body, const char *key, char *out, siz
     return 0;
 }
 
+// Extract JSON boolean value for a key (accepts true/false without quotes or quoted "true"/"false")
+static int extract_json_bool(const char *body, const char *key, int *out) {
+    const char *k = strstr(body, key);
+    if (!k) return -1;
+    const char *col = strchr(k, ':');
+    if (!col) return -1;
+    const char *p = col + 1;
+    // skip whitespace
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '"') {
+        p++;
+        if (strncmp(p, "true", 4) == 0 && (p[4] == '"' || p[4] == '\0')) { if (out) *out = 1; return 0; }
+        if (strncmp(p, "false", 5) == 0 && (p[5] == '"' || p[5] == '\0')) { if (out) *out = 0; return 0; }
+        return -1;
+    }
+    if (strncmp(p, "true", 4) == 0) { if (out) *out = 1; return 0; }
+    if (strncmp(p, "false", 5) == 0) { if (out) *out = 0; return 0; }
+    return -1;
+}
+
 // IPv4 -> /proc/net/tcp helper removed (unused).
 
 // Per-connection UID lookup removed; web UI operates globally.
@@ -1467,11 +1487,9 @@ void handle_http_request(int client_fd, const char *request) {
             return;
         }
         // optionally activate if 'activate' flag is present
-        char activate_str[8] = {0};
-        if (extract_json_string(body_start, "\"activate\"", activate_str, sizeof(activate_str)) == 0) {
-            if (strcmp(activate_str, "true") == 0) {
-                snprintf(active_skin, sizeof(active_skin), "%s", installed_id); save_config_file();
-            }
+        int activate_bool = 0;
+        if (extract_json_bool(body_start, "\"activate\"", &activate_bool) == 0) {
+            if (activate_bool) { snprintf(active_skin, sizeof(active_skin), "%s", installed_id); save_config_file(); }
         }
         free(decoded); free(b64);
         unlink(tmpfile_template);

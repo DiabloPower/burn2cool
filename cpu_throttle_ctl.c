@@ -61,10 +61,13 @@ void print_help(const char *name) {
     printf("\nSkin commands:\n");
         printf("  skins list             List installed system-wide skins\n");
         printf("  skins install <archive> Install a local skin archive (tar.gz, tar, zip) by uploading it to the daemon\n");
+        printf("    --activate, -a       Activate the skin after install (attempts to parse installed id from response)\n");
         printf("  skins activate <id>    Activate a skin by id\n");
         printf("  skins deactivate <id>  Deactivate the specified skin\n");
         printf("  skins remove <id>      Remove a skin (delete files; admin-only)\n");
         printf("  skins default          Reset UI to the built-in default (clear active skin)\n");
+        printf("    --json, -j           Request JSON output (daemon will return JSON)\n");
+        printf("    --pretty, -p         Request JSON output and attempt to format it (if tool available)\n");
     printf("\nExamples:\n");
     printf("  %s set-safe-max 3000000\n", name);
     printf("  %s save-profile gaming\n", name);
@@ -133,7 +136,22 @@ char *send_command_get_response(const char *cmd) {
     // Read up to some reasonable max (e.g., 32KB)
     size_t cap = 32768; char *buf = malloc(cap);
     if (!buf) { close(sock_fd); return NULL; }
-    ssize_t n = recv(sock_fd, buf, (ssize_t)cap - 1, 0);
+    size_t total = 0;
+    while (1) {
+        ssize_t n = recv(sock_fd, buf + total, (ssize_t)cap - 1 - total, 0);
+        if (n > 0) {
+            total += (size_t)n;
+            if (cap - total < 4096) {
+                size_t ncap = cap * 2;
+                char *nb = realloc(buf, ncap);
+                if (!nb) break;
+                buf = nb; cap = ncap;
+            }
+            continue;
+        }
+        break;
+    }
+    ssize_t n = (ssize_t)total;
     close(sock_fd);
     if (n <= 0) { free(buf); return NULL; }
     buf[n] = '\0';
@@ -454,7 +472,7 @@ int main(int argc, char *argv[]) {
         }
         if (strcmp(argv[2], "list") == 0) {
             // Optional 'json' argument to request JSON output
-            if (argc >= 4 && strcmp(argv[3], "json") == 0) {
+                if (argc >= 4 && (strcmp(argv[3], "json") == 0 || strcmp(argv[3], "--json") == 0 || strcmp(argv[3], "-j") == 0)) {
                 char *resp = send_command_get_response("list-skins json");
                 if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
                 printf("%s", resp);
