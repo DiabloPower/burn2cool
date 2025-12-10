@@ -272,7 +272,10 @@ install_deps() {
 regenerate_asset_headers() {
   local assets_dir="assets"
   local include_dir="include"
+  # Ensure include dir exists and remove any stale generated headers so they
+  # will be recreated cleanly by xxd or make assets.
   mkdir -p "$include_dir"
+  rm -f "$include_dir/index_html.h" "$include_dir/main_js.h" "$include_dir/styles_css.h" "$include_dir/favicon_ico.h" "$include_dir/assets_generated.h" || true
   if command -v xxd >/dev/null 2>&1; then
     log "Generating asset headers with xxd"
     xxd -i "$assets_dir/index.html" > "$include_dir/index_html.h" || return 1
@@ -286,6 +289,7 @@ regenerate_asset_headers() {
   cat > "$include_dir/assets_generated.h" <<'H'
 #define USE_ASSET_HEADERS 1
 H
+  log "Wrote include/assets_generated.h and set USE_ASSET_HEADERS"
   return 0
 }
 
@@ -782,8 +786,13 @@ download_source_and_build() {
   log "Building from source with make..."
   # Attempt to regenerate asset headers in source tree; if successful,
   # remove pre-generated headers so make assets will recreate them.
+  # Attempt to regenerate asset headers in source tree so the build embeds the
+  # generated header arrays. This ensures the resulting binary will include the
+  # assets by default (single-file binary). If xxd is missing and generation
+  # fails, the build will still continue and fallback to existing headers or
+  # serving from disk depending on build options.
   if (cd "$src_dir" && regenerate_asset_headers); then
-    log "Regenerated asset headers in source tree"
+    log "Regenerated asset headers in source tree (embedded assets will be compiled in)"
   else
     log "Using existing asset headers if present"
   fi
@@ -794,6 +803,9 @@ download_source_and_build() {
     else
       MAKE_SHELL_ARG=""
     fi
+    # Ensure the assets target runs so the headers are recreated by the Make
+    # pipeline. This step is intentionally tolerant of failures so the build
+    # proceeds even on systems without xxd (fallback to include/ if available).
     (cd "$src_dir" && if make $MAKE_SHELL_ARG assets 2>/dev/null || true; then true; fi)
     (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" )
   else
