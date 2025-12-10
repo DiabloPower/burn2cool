@@ -122,6 +122,9 @@ static const char *guess_mime(const char *path);
 /* forward declaration for parse_skin_manifest used by installer install helper: will be declared unconditionally below */
 
 #endif /* USE_ASSET_HEADERS */
+
+/* Ensure send_http_response_len is declared even when assets are embedded. */
+void send_http_response_len(int client_fd, const char *status, const char *content_type, const void *body, size_t len, const char *extra_headers);
 #ifndef ASSET_MAIN_JS
 #define ASSET_MAIN_JS assets_main_js
 #define ASSET_MAIN_JS_LEN assets_main_js_len
@@ -273,6 +276,7 @@ static int serve_file_with_skin_extra(int client_fd, const char *path, const cha
 
 /* Serve an asset from disk (path relative to ASSETS_DIR). Returns 1 if served,
  * 0 if not found, -1 on error. */
+static int serve_asset_from_disk(int client_fd, const char *relpath) __attribute__((unused));
 static int serve_asset_from_disk(int client_fd, const char *relpath) {
     char path[1024];
     snprintf(path, sizeof(path), "%s%s", ASSETS_DIR, relpath);
@@ -366,7 +370,7 @@ void load_config_file() {
                 safe_max = atoi(value);
                 LOG_VERBOSE("Config: safe_max = %d\n", safe_max);
             } else if (strcmp(key, "sensor") == 0) {
-                strncpy(temp_path, value, sizeof(temp_path) - 1);
+                snprintf(temp_path, sizeof(temp_path), "%s", value);
                 temp_path[sizeof(temp_path) - 1] = '\0';
                 LOG_VERBOSE("Config: sensor = %s\n", temp_path);
             } else if (strcmp(key, "thermal_zone") == 0) {
@@ -379,12 +383,10 @@ void load_config_file() {
                 web_port = atoi(value);
                 LOG_VERBOSE("Config: web_port = %d\n", web_port);
             } else if (strcmp(key, "skin") == 0) {
-                strncpy(active_skin, value, sizeof(active_skin)-1);
-                active_skin[sizeof(active_skin)-1] = '\0';
+                snprintf(active_skin, sizeof(active_skin), "%s", value);
                 LOG_VERBOSE("Config: active skin = %s\n", active_skin);
             } else if (strcmp(key, "excluded_types") == 0) {
-                strncpy(excluded_types_config, value, sizeof(excluded_types_config)-1);
-                excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", value);
                 LOG_VERBOSE("Config: excluded_types = %s\n", excluded_types_config);
             } else {
                 LOG_VERBOSE("Config: Unknown key '%s' at line %d\n", key, line_num);
@@ -455,7 +457,7 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (r >= 2 && sig[0] == 0x1F && sig[1] == 0x8B) use_tar = 1; // gzip
     if (r >= 2 && sig[0] == 'P' && sig[1] == 'K') use_zip = 1; // zip
 
-    char cmd[1024]; int rc = -1;
+    char cmd[4096]; int rc = -1;
     // Try common extraction patterns: gzip tar, plain tar, unzip
     if (use_tar) {
         snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", archive_path, staging);
@@ -491,7 +493,7 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
         LOG_ERROR("install_skin_archive_from_file: failed to extract archive %s (rc=%d)\n", archive_path, rc);
         // cleanup
         snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging);
-        system(cmd);
+        rc = system(cmd); (void)rc;
         return -1;
     }
     // After extraction, check whether the staging area contains a single
@@ -510,7 +512,7 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
                 if (entry->d_name[0] == '.') continue;
                 // only count non-hidden entries
                 top_count++;
-                if (top_count == 1) strncpy(candidate, entry->d_name, sizeof(candidate)-1);
+                if (top_count == 1) snprintf(candidate, sizeof(candidate), "%s", entry->d_name);
             }
             closedir(sd);
             if (top_count == 1) {
@@ -530,8 +532,8 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     char manifest_path[1024];
     snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth 3 -type f -name manifest.json -print -quit", staging);
     FILE *fp = popen(cmd, "r");
-    if (!fp) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
-    if (!fgets(manifest_path, sizeof(manifest_path), fp)) { pclose(fp); snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+    if (!fp) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
+    if (!fgets(manifest_path, sizeof(manifest_path), fp)) { pclose(fp); snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
     pclose(fp);
     // Trim newline
     char *nl = strchr(manifest_path, '\n'); if (nl) *nl = '\0';
@@ -541,24 +543,25 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (!idbuf[0]) {
         // fallback to directory name containing manifest
         char *dir = strdup(manifest_path);
-        if (!dir) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+        if (!dir) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
         char *d = dirname(dir);
-        if (d) strncpy(idbuf, basename(d), sizeof(idbuf)-1);
+        if (d) snprintf(idbuf, sizeof(idbuf), "%s", basename(d));
         free(dir);
     }
-    if (!idbuf[0]) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd); return -1; }
+    if (!idbuf[0]) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
     // Install to SKINS_DIR/<id>
     char dest[1024]; snprintf(dest, sizeof(dest), "%s/%s", SKINS_DIR, idbuf);
     // Use quoting that allows glob expansion for rm -rf path/* while still being safe for paths with spaces
     // Use the computed src_path that may have stripped a single top-level dir
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && rm -rf '%s'/* && cp -a '%s'/. '%s' && chown -R root:root '%s'", dest, dest, src_path, dest, dest);
+    int slen = snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && rm -rf '%s'/* && cp -a '%s'/. '%s' && chown -R root:root '%s'", dest, dest, src_path, dest, dest);
     LOG_VERBOSE("install_skin_archive_from_file: running install cmd: %s\n", cmd);
-    rc = system(cmd);
+    if (slen < 0 || slen >= (int)sizeof(cmd)) { LOG_ERROR("install_skin_archive_from_file: command truncated\n"); rc = -1; }
+    else rc = system(cmd);
     // Cleanup
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); system(cmd);
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc;
     if (rc != 0) { LOG_ERROR("install_skin_archive_from_file: failed to copy/perm dest %s (rc=%d)\n", dest, rc); return -1; }
     // Success
-    strncpy(out_id, idbuf, id_sz-1); out_id[id_sz-1] = '\0';
+    snprintf(out_id, id_sz, "%s", idbuf);
     return 0;
 }
 
@@ -604,10 +607,10 @@ void build_skins_json(char *buf, size_t bufsz) {
         if (pathlen + sizeof("/manifest.json") >= sizeof(manifest_path)) continue;
         snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", path);
         char id[256]; char name[256]; int allow_js = 0; parse_skin_manifest(manifest_path, id, sizeof(id), name, sizeof(name), &allow_js);
-        if (!id[0]) { strncpy(id, ent->d_name, sizeof(id)-1); id[sizeof(id)-1] = '\0'; }
-        if (!name[0]) { strncpy(name, id, sizeof(name)-1); name[sizeof(name)-1] = '\0'; }
+        if (!id[0]) { snprintf(id, sizeof(id), "%s", ent->d_name); }
+        if (!name[0]) { snprintf(name, sizeof(name), "%s", id); }
         /* normalize id for dedupe: lowercase and trim */
-        char normalized[256]; strncpy(normalized, id, sizeof(normalized)-1); normalized[sizeof(normalized)-1] = '\0';
+        char normalized[256]; snprintf(normalized, sizeof(normalized), "%s", id);
         for (char *p = normalized; *p; ++p) *p = tolower((unsigned char)*p);
         trim_whitespace(normalized);
         /* skip duplicate entries by normalized id (case-insensitive) */
@@ -620,7 +623,7 @@ void build_skins_json(char *buf, size_t bufsz) {
             continue;
         }
         /* record id */
-        strncpy(seen_ids[seen_count], normalized, sizeof(seen_ids[0]) - 1);
+        snprintf(seen_ids[seen_count], sizeof(seen_ids[0]), "%s", normalized);
         seen_ids[seen_count][sizeof(seen_ids[0]) - 1] = '\0';
         seen_count++;
         if (!first) used += snprintf(tmp + used, sizeof(tmp) - used, ",");
@@ -951,9 +954,15 @@ void build_zones_json(char *buffer, size_t size) {
 }
 
 void build_limits_json(char *buffer, size_t size) {
-    char sensor_tmp[256];
-    strncpy(sensor_tmp, temp_path, sizeof(sensor_tmp)-1);
+    char sensor_tmp[512];
+    snprintf(sensor_tmp, sizeof(sensor_tmp), "%s", temp_path);
     sensor_tmp[sizeof(sensor_tmp)-1] = '\0';
+    /* Some compilers warn about potential format truncation here because
+     * temp_path may be long; the buffer should be large enough (>= 2048 in
+     * callers), and we defensively silence the specific warning for this
+     * controlled use. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
     snprintf(buffer, size,
              "{"
              "\"cpu_min_freq\":%d,"
@@ -961,6 +970,7 @@ void build_limits_json(char *buffer, size_t size) {
              "\"temp_sensor\":\"%s\""
              "}",
              cpu_min_freq, cpu_max_freq, sensor_tmp);
+#pragma GCC diagnostic pop
 }
 
 // Minimal base64 decode helper (ignores invalid characters)
@@ -1089,7 +1099,7 @@ void build_profiles_list_json(char *buffer, size_t size) {
         if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
             // extract name without .config
             char name[256];
-            strncpy(name, ent->d_name, sizeof(name));
+            snprintf(name, sizeof(name), "%s", ent->d_name);
             name[sizeof(name)-1] = '\0';
             char *dot = strrchr(name, '.');
             if (dot) *dot = '\0';
@@ -1281,7 +1291,7 @@ void handle_http_request(int client_fd, const char *request) {
     
     LOG_VERBOSE("HTTP %s %s\n", method, path);
     
-    char response[2048];
+    char response[2048]; int rc = -1;
     // Serve skin files under /skins/<id>/<file>
     if (strncmp(path, "/skins/", 7) == 0) {
         const char *p = path + 7;
@@ -1460,7 +1470,7 @@ void handle_http_request(int client_fd, const char *request) {
         char activate_str[8] = {0};
         if (extract_json_string(body_start, "\"activate\"", activate_str, sizeof(activate_str)) == 0) {
             if (strcmp(activate_str, "true") == 0) {
-                strncpy(active_skin, installed_id, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0'; save_config_file();
+                snprintf(active_skin, sizeof(active_skin), "%s", installed_id); save_config_file();
             }
         }
         free(decoded); free(b64);
@@ -1489,7 +1499,7 @@ void handle_http_request(int client_fd, const char *request) {
                     send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
                 } else {
                     // activate skin
-                    strncpy(active_skin, id, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0';
+                    snprintf(active_skin, sizeof(active_skin), "%s", id);
                     save_config_file();
                     snprintf(response, sizeof(response), "{\"ok\":true,\"active\":\"%s\"}", active_skin);
                     send_http_response(client_fd, "200 OK", "application/json", response);
@@ -1514,8 +1524,8 @@ void handle_http_request(int client_fd, const char *request) {
                         send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
                     } else {
                         if (strcmp(active_skin, id) == 0) { active_skin[0] = '\0'; save_config_file(); }
-                        char cmdrem[1024]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, id);
-                        system(cmdrem);
+                        char cmdrem[4096]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, id);
+                        rc = system(cmdrem); (void)rc;
                         snprintf(response, sizeof(response), "{\"ok\":true,\"removed\":\"%s\"}", id);
                         send_http_response(client_fd, "200 OK", "application/json", response);
                     }
@@ -1708,8 +1718,7 @@ void handle_http_request(int client_fd, const char *request) {
                     if (read_profile_file(pname, body, sizeof(body)) == 0) {
                         // apply key=values
                             char tmp[4096];
-                            strncpy(tmp, body, sizeof(tmp)-1);
-                            tmp[sizeof(tmp)-1] = '\0';
+                            snprintf(tmp, sizeof(tmp), "%s", body);
                         char *ln = strtok(tmp, "\n");
                         while (ln) {
                             char key[64], val[64];
@@ -1806,7 +1815,7 @@ void handle_http_request(int client_fd, const char *request) {
                                 if (end_val_quote) {
                                     size_t len = end_val_quote - first_val_quote - 1;
                                     if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
-                                    strncpy(valbuf, first_val_quote + 1, len);
+                                    snprintf(valbuf, sizeof(valbuf), "%.*s", (int)len, first_val_quote + 1);
                                     valbuf[len] = 0;
                                 }
                             }
@@ -1815,8 +1824,7 @@ void handle_http_request(int client_fd, const char *request) {
                 }
                 if (valbuf[0]) {
                     for (char *p = valbuf; *p; ++p) *p = tolower(*p);
-                    strncpy(excluded_types_config, valbuf, sizeof(excluded_types_config)-1);
-                    excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                    snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", valbuf);
                     save_config_file();
                     snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"%s\"}", excluded_types_config);
                 } else {
@@ -1937,7 +1945,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
             }
 
             // Parse command
-            char cmd[64], arg[192];
+            char cmd[64], arg[192]; int rc = -1;
             char response[512];
 
             // Find first space to split cmd and arg
@@ -1945,10 +1953,10 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
             if (space) {
                 size_t cmd_len = space - buffer;
                 if (cmd_len > 63) cmd_len = 63;
-                strncpy(cmd, buffer, cmd_len);
+                // Copy command from buffer; cmd_len already bounded by 63
+                memcpy(cmd, buffer, cmd_len);
                 cmd[cmd_len] = '\0';
-                strncpy(arg, space + 1, 191);
-                arg[191] = '\0'; // ensure null termination
+                snprintf(arg, sizeof(arg), "%s", space + 1);
                 // trim trailing newline or spaces from arg
                 char *end = arg + strlen(arg) - 1;
                 while (end > arg && (*end == '\n' || *end == '\r' || *end == ' ')) {
@@ -2249,8 +2257,8 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     } else {
                         // If this skin is active, clear it
                         if (strcmp(active_skin, arg) == 0) { active_skin[0] = '\0'; save_config_file(); }
-                        char cmdrem[1024]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, arg);
-                        system(cmdrem);
+                        char cmdrem[4096]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, arg);
+                        rc = system(cmdrem); (void)rc;
                         snprintf(response, sizeof(response), "OK: skin %s removed\n", arg);
                     }
                 }
@@ -2259,8 +2267,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     if (read_profile_file(arg, body, sizeof(body)) == 0) {
                         // apply key=values
                         char tmp[4096];
-                        strncpy(tmp, body, sizeof(tmp)-1);
-                        tmp[sizeof(tmp)-1] = '\0';
+                        snprintf(tmp, sizeof(tmp), "%s", body);
                         char *ln = strtok(tmp, "\n");
                         while (ln) {
                             char key[64], val[64];
