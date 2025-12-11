@@ -509,8 +509,8 @@ component_selection() {
   
   local selected=()
   if [ "${YES:-0}" -eq 1 ] || [ "${AUTO_YES:-0}" -eq 1 ]; then
-    # For non-interactive: use defaults, but firewall false unless explicitly enabled
-    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "${defaults[5]}" "false" "${defaults[7]}")
+    # For non-interactive: use defaults, but web API always enabled for --yes
+    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "true" "${defaults[6]}" "${defaults[7]}")
     if [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then
       selected[6]="true"
     fi
