@@ -631,6 +631,7 @@ filter_assets_and_download() {
   if [ "${WANT_GUI:-0}" -eq 1 ] && [ "${GUI_BUILT:-0}" -eq 0 ]; then patterns+=("gui" "tray" "burn2cool_tray" "gui_tray"); fi
   for i in "${!names[@]}"; do
     n="${names[$i]}"; u="${urls[$i]}"
+    log "Checking asset: $n"
     # skip scripts/build metadata
     if [[ "$n" =~ \.sh$ ]] || [[ "$n" =~ autobuild ]]; then
       continue
