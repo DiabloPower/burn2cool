@@ -29,8 +29,12 @@ sudo ./cpu_throttle
 2) Install via the installer (detects distro, builds if needed, creates systemd unit)
 
 ```bash
-# non-interactive
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh)" -- -y
+# non-interactive (installs everything: daemon, ctl, tui, gui, web API, service)
+curl -fsSL https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh | bash -s -- --yes
+
+# or download and run locally
+wget https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh
+bash install_cpu-throttle.sh --yes
 ```
 
 3) Build from source (developers)
