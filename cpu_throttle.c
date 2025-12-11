@@ -571,7 +571,7 @@ int save_config_file() {
                 fprintf(fpvar, "excluded_types=%s\n", excluded_types_config);
                 fclose(fpvar);
                 LOG_INFO("Configuration saved to runtime config %s\n", VARLIB_CONFIG);
-                strncpy(saved_config_path, VARLIB_CONFIG, sizeof(saved_config_path)-1);
+                snprintf(saved_config_path, sizeof(saved_config_path), "%s", VARLIB_CONFIG);
                 saved_config_path[sizeof(saved_config_path)-1] = '\0';
                 return 0;
             }
@@ -602,7 +602,7 @@ int save_config_file() {
             fprintf(fp, "excluded_types=%s\n", excluded_types_config);
             fclose(fp);
             LOG_INFO("Configuration saved to user config %s\n", usercfg);
-            strncpy(saved_config_path, usercfg, sizeof(saved_config_path)-1);
+            snprintf(saved_config_path, sizeof(saved_config_path), "%s", usercfg);
             saved_config_path[sizeof(saved_config_path)-1] = '\0';
             return 0;
         }
@@ -622,7 +622,7 @@ int save_config_file() {
     
     fclose(fp);
     LOG_INFO("Configuration saved to %s\n", CONFIG_FILE);
-    strncpy(saved_config_path, CONFIG_FILE, sizeof(saved_config_path)-1);
+    snprintf(saved_config_path, sizeof(saved_config_path), "%s", CONFIG_FILE);
     saved_config_path[sizeof(saved_config_path)-1] = '\0';
     return 0;
 }
@@ -842,7 +842,7 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (rc == 0) {
         // Step 3: cp -a src_path/. dest
         char src_dot[1024];
-        snprintf(src_dot, sizeof(src_dot), "%s/.", src_path);
+        snprintf(src_dot, sizeof(src_dot), "%.*s/.", (int)(sizeof(src_dot)-3), src_path);
         pid_t pid_cp = fork();
         if (pid_cp == 0) {
             execlp("cp", "cp", "-a", src_dot, dest, NULL);
@@ -972,13 +972,12 @@ static int is_excluded_thermal_type(const char *lower_type) {
     // Check configured excluded types first (comma separated list)
     if (excluded_types_config[0]) {
         char tmp[512];
-        strncpy(tmp, excluded_types_config, sizeof(tmp)-1);
-        tmp[sizeof(tmp)-1] = '\0';
+        snprintf(tmp, sizeof(tmp), "%s", excluded_types_config);
         char *tok = strtok(tmp, ",");
         while (tok) {
             // normalize token to lowercase
             char t[256];
-            strncpy(t, tok, sizeof(t)-1);
+            snprintf(t, sizeof(t), "%s", tok);
             t[sizeof(t)-1] = '\0';
             for (char *p = t; *p; ++p) *p = tolower(*p);
             // exact or substring match in the lower_type
@@ -1046,7 +1045,7 @@ static void normalize_excluded_types(char *out, size_t out_sz, const char *in) {
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!in || !in[0]) return;
-    char tmp[512]; strncpy(tmp, in, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+    char tmp[512]; snprintf(tmp, sizeof(tmp), "%s", in);
     char *tok = strtok(tmp, ",");
     char seen[32][128]; int seen_count = 0;
     int first = 1;
@@ -1065,7 +1064,7 @@ static void normalize_excluded_types(char *out, size_t out_sz, const char *in) {
             int dup = 0;
             for (int i = 0; i < seen_count; ++i) { if (strcmp(seen[i], lower) == 0) { dup = 1; break; } }
             if (!dup) {
-                if (seen_count < (int)(sizeof(seen)/sizeof(seen[0]))) strncpy(seen[seen_count++], lower, sizeof(seen[0])-1);
+                if (seen_count < (int)(sizeof(seen)/sizeof(seen[0]))) snprintf(seen[seen_count++], sizeof(seen[0]), "%s", lower);
                 if (!first) {
                     strncat(out, ",", out_sz - strlen(out) - 1);
                 }
@@ -1147,7 +1146,7 @@ int setup_socket() {
     
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
     addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
     
     if (bind(socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -1274,7 +1273,7 @@ void build_status_json(char *buffer, size_t size) {
     uid_t uid = geteuid();
     char uname[64] = "";
     struct passwd *pw = getpwuid(uid);
-    if (pw) strncpy(uname, pw->pw_name, sizeof(uname)-1);
+    if (pw) snprintf(uname, sizeof(uname), "%s", pw->pw_name);
     else snprintf(uname, sizeof(uname), "uid:%d", (int)uid);
 
     snprintf(buffer, size,
@@ -2446,7 +2445,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     end--;
                 }
             } else {
-                strncpy(cmd, buffer, 63);
+                snprintf(cmd, sizeof(cmd), "%.*s", 63, buffer);
                 cmd[63] = '\0';
                 arg[0] = '\0';
             }
@@ -2502,11 +2501,11 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         } else if (normalized[0] == '\0') {
                             snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
                         } else {
-                            strncpy(excluded_types_config, normalized, sizeof(excluded_types_config)-1);
+                            snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", normalized);
                             excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
                             int sr = save_config_file();
-                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.480s (saved to %.256s)\n", excluded_types_config, saved_config_path);
-                            else snprintf(response, sizeof(response), "OK: excluded types set to %.480s (not saved)\n", excluded_types_config);
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.400s (saved to %.200s)\n", excluded_types_config, saved_config_path);
+                            else snprintf(response, sizeof(response), "OK: excluded types set to %.400s (not saved)\n", excluded_types_config);
                         }
                     } else {
                         snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
@@ -2720,7 +2719,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                                 if (stat(full, &st) == 0 && S_ISREG(st.st_mode) && strstr(ent->d_name, ".config")) {
                                     // remove .config
                                     char name[256];
-                                    strncpy(name, ent->d_name, sizeof(name));
+                                    snprintf(name, sizeof(name), "%s", ent->d_name);
                                     char *dot = strrchr(name, '.');
                                     if (dot) *dot = '\0';
                                     int written = snprintf(ptr, remaining, "%s\n", name);
@@ -2763,7 +2762,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     if (!skin_exists(arg)) {
                         snprintf(response, sizeof(response), "ERROR: skin not found\n");
                     } else {
-                        strncpy(active_skin, arg, sizeof(active_skin)-1); active_skin[sizeof(active_skin)-1] = '\0';
+                        snprintf(active_skin, sizeof(active_skin), "%s", arg);
                         save_config_file();
                         snprintf(response, sizeof(response), "OK: skin %s activated\n", active_skin);
                     }
@@ -3017,7 +3016,7 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
         } else if (strcmp(argv[i], "--sensor") == 0 && i + 1 < argc) {
-            strncpy(temp_path, argv[++i], sizeof(temp_path) - 1);
+            snprintf(temp_path, sizeof(temp_path), "%s", argv[++i]);
             temp_path[sizeof(temp_path)-1] = '\0';
             temp_path[sizeof(temp_path) - 1] = '\0';
         } else if (strcmp(argv[i], "--thermal-zone") == 0 && i + 1 < argc) {

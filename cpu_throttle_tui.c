@@ -102,20 +102,22 @@ char* pretty_print_status_kv(const char *json) {
             if (*p == '"') {
                 size_t klen = (size_t)(p - kstart);
                 if (klen >= sizeof(key)) klen = sizeof(key) - 1;
-                strncpy(key, kstart, klen); key[klen] = '\0';
+                snprintf(key, sizeof(key), "%.*s", (int)klen, kstart);
                 p++; // after closing quote
                 // skip spaces and colon
                 while (*p && isspace((unsigned char)*p)) p++;
-                if (*p == ':') p++; while (*p && isspace((unsigned char)*p)) p++;
+                if (*p == ':') { p++; }
+                while (*p && isspace((unsigned char)*p)) p++;
                 // value: could be string, number, object, array
                 if (*p == '"') {
                     p++; const char *vstart = p; while (*p && *p != '"') p++; size_t vlen = (size_t)(p - vstart); char val[256] = "";
-                    if (vlen >= sizeof(val)) vlen = sizeof(val) - 1; strncpy(val, vstart, vlen); val[vlen] = '\0';
-                    p++; // skip closing quote
+                    if (vlen >= (int)sizeof(val)) { vlen = sizeof(val) - 1; }
+                    snprintf(val, sizeof(val), "%.*s", (int)vlen, vstart);
+                        p++; // skip closing quote
                     out += sprintf(out, "%s: %s\n", key, val);
                 } else if (*p == '{') {
                     // nested object, skip until matching '}' and show placeholder
-                    int depth = 1; const char *vstart = p; p++;
+                    int depth = 1; p++;
                     while (*p && depth > 0) { if (*p == '{') depth++; else if (*p == '}') depth--; p++; }
                     out += sprintf(out, "%s: {...}\n", key);
                 } else if (*p == '[') {
@@ -130,7 +132,8 @@ char* pretty_print_status_kv(const char *json) {
                     while (vlen > 0 && isspace((unsigned char)vstart[vlen-1])) vlen--;
                     // trim trailing commas if any
                     if (vlen > 0 && vstart[vlen-1] == ',') vlen--;
-                    if (vlen >= sizeof(val)) vlen = sizeof(val)-1; strncpy(val, vstart, vlen); val[vlen] = '\0';
+                    if (vlen >= (int)sizeof(val)) { vlen = sizeof(val) - 1; }
+                    snprintf(val, sizeof(val), "%.*s", (int)vlen, vstart);
                     // trim leading whitespace
                     char *vp = val; while (*vp && isspace((unsigned char)*vp)) vp++;
                     out += sprintf(out, "%s: %s\n", key, vp);
@@ -188,8 +191,7 @@ char* format_limits_zones(const char* json, int is_limits) {
                         // populate global zones_arr for navigation if provided by caller
                         if (zones_count < 256) {
                             zones_arr[zones_count].zone = zone;
-                            strncpy(zones_arr[zones_count].type, type, sizeof(zones_arr[zones_count].type)-1);
-                            zones_arr[zones_count].type[sizeof(zones_arr[zones_count].type)-1] = '\0';
+                                snprintf(zones_arr[zones_count].type, sizeof(zones_arr[zones_count].type), "%s", type);
                             zones_arr[zones_count].temp = atoi(temp_str);
                             zones_arr[zones_count].excluded = excluded ? 1 : 0;
                             zones_count++;
@@ -286,7 +288,7 @@ char* format_status_kv(const char* json) {
     }
     // fallback: if nothing was extracted, clean up the raw JSON slightly
     if (buf[0] == '\0') {
-        char tmp[4096], out[4096]; strncpy(tmp, json, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+        char tmp[4096], out[4096]; snprintf(tmp, sizeof(tmp), "%s", json);
         for (char *q = tmp; *q; ++q) { if (*q == '{' || *q == '}' || *q == '"') *q = ' '; }
         for (char *q = tmp; *q; ++q) { if (*q == ',') *q = ' '; }
         // collapse whitespace
@@ -337,7 +339,7 @@ static int limits_count = 0;
 // Helper: get current value of use_avg_temp from status_buf; returns 0 or 1 or -1 if not available
 static int get_use_avg_temp(void) {
     pthread_mutex_lock(&state_lock);
-    char local[4096]; strncpy(local, status_buf, sizeof(local)-1); local[sizeof(local)-1] = '\0';
+    char local[4096]; snprintf(local, sizeof(local), "%s", status_buf);
     pthread_mutex_unlock(&state_lock);
     char *p = strstr(local, "\"use_avg_temp\"");
     if (!p) return -1;
@@ -352,7 +354,7 @@ static int get_use_avg_temp(void) {
 static int get_running_user(char *out, size_t outsz) {
     if (!out || outsz == 0) return -1;
     pthread_mutex_lock(&state_lock);
-    char local[4096]; strncpy(local, status_buf, sizeof(local)-1); local[sizeof(local)-1] = '\0';
+    char local[4096]; snprintf(local, sizeof(local), "%s", status_buf);
     pthread_mutex_unlock(&state_lock);
     char *p = strstr(local, "\"running_user\"");
     if (!p) return -1;
@@ -364,8 +366,7 @@ static int get_running_user(char *out, size_t outsz) {
         char *q = strchr(p, '"'); if (!q) return -1;
         size_t len = q - p;
         if (len >= outsz) len = outsz - 1;
-        strncpy(out, p, len);
-        out[len] = '\0';
+        snprintf(out, outsz, "%.*s", (int)len, p);
         // trim whitespace
         while (len > 0 && isspace((unsigned char)out[len-1])) { out[--len] = '\0'; }
         while (*out && isspace((unsigned char)*out)) { memmove(out, out+1, strlen(out)); }
@@ -373,8 +374,7 @@ static int get_running_user(char *out, size_t outsz) {
     } else {
         char *q = p; size_t len = 0; while (*q && !isspace((unsigned char)*q) && *q != ',' && *q != '}') { q++; len++; }
         if (len >= outsz) len = outsz - 1;
-        strncpy(out, p, len);
-        out[len] = '\0';
+        snprintf(out, outsz, "%.*s", (int)len, p);
         // trim trailing whitespace
         while (len > 0 && isspace((unsigned char)out[len-1])) { out[--len] = '\0'; }
         while (*out && isspace((unsigned char)*out)) { memmove(out, out+1, strlen(out)); }
@@ -384,7 +384,7 @@ static int get_running_user(char *out, size_t outsz) {
 
 static int get_web_port_from_status(void) {
     pthread_mutex_lock(&state_lock);
-    char local[4096]; strncpy(local, status_buf, sizeof(local)-1); local[sizeof(local)-1] = '\0';
+    char local[4096]; snprintf(local, sizeof(local), "%s", status_buf);
     pthread_mutex_unlock(&state_lock);
     char *p = strstr(local, "\"web_port\"");
     if (!p) return 0;
@@ -402,10 +402,10 @@ static void mvwprintw_scrollable(WINDOW *win, int row, int col, int width, const
             wmove(win, row, col + width); wclrtoeol(win);
         return;
     }
-    if (!selected) {
+        if (!selected) {
         // show left anchored with ellipsis
         if (width > 3) {
-                char buf[512]; strncpy(buf, s, width - 3); buf[width - 3] = '\0';
+                char buf[512]; int blen = width - 3; if (blen < 0) blen = 0; if (blen > (int)sizeof(buf)-1) blen = (int)sizeof(buf)-1; snprintf(buf, sizeof(buf), "%.*s", blen, s);
             mvwprintw(win, row, col, "%s...", buf);
             wmove(win, row, col + width); wclrtoeol(win);
         } else {
@@ -430,12 +430,105 @@ static void mvwprintw_scrollable(WINDOW *win, int row, int col, int width, const
     if (maxOffset < 0) maxOffset = 0;
     if (offset > maxOffset) offset = maxOffset;
     const char *start = s + offset;
-    char buf2[4096]; strncpy(buf2, start, avail); buf2[avail] = '\0';
+    char buf2[4096]; int av = avail; if (av < 0) av = 0; if (av > (int)sizeof(buf2)-1) av = (int)sizeof(buf2)-1; snprintf(buf2, sizeof(buf2), "%.*s", av, start);
     int x = col;
     if (leftEll) { mvwprintw(win, row, x, "..."); x += 3; }
     mvwprintw(win, row, x, "%s", buf2); x += avail;
     if (rightEll) { mvwprintw(win, row, x, "..."); }
     wmove(win, row, col + width); wclrtoeol(win);
+}
+
+// Count how many wrapped lines a single paragraph string will produce for given width
+static int wrapped_count(const char *s, int width) {
+    if (!s || width <= 0) return 0;
+    int count = 0;
+    const char *p = s;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++; // skip spaces
+        if (!*p) break;
+        int line_len = 0;
+        const char *q = p;
+        while (*q && !isspace((unsigned char)*q)) q++; // advance to end of first word
+        // If the first word is longer than the width, it will occupy ceil(len/width) pieces
+        if ((int)(q - p) > width) {
+            int leftover = (int)(q - p);
+            count += (leftover + width - 1) / width;
+            // skip the very long word
+            while (*p && !isspace((unsigned char)*p)) p++;
+            continue;
+        }
+        // else, try to accumulate words into the current line
+        line_len = 0;
+        const char *wp = p;
+        while (wp && *wp) {
+            // look for next word
+            const char *r = wp; int wlen = 0; while (*r && !isspace((unsigned char)*r)) { wlen++; r++; }
+            if (line_len == 0) {
+                if (wlen > width) { // split long word
+                    count += (wlen + width - 1) / width;
+                    // move wp to after the word
+                    while (*wp && !isspace((unsigned char)*wp)) wp++;
+                } else { line_len = wlen; wp = r; while (*wp && isspace((unsigned char)*wp)) wp++; }
+            } else {
+                if (line_len + 1 + wlen <= width) { line_len += 1 + wlen; wp = r; while (*wp && isspace((unsigned char)*wp)) wp++; }
+                else break;
+            }
+            if (!*wp) break;
+        }
+        count++;
+        // advance p to after the line we just counted (wp)
+        if (wp == p) { // safeguard to avoid infinite loop
+            while (*p && !isspace((unsigned char)*p)) p++;
+        } else p = wp;
+    }
+    return count;
+}
+
+// Retrieve the 'target' wrapped line (0-indexed) for paragraph s using width, write to out
+static void get_wrapped_line(const char *s, int width, int target, char *out, size_t out_sz) {
+    if (!s || width <= 0 || !out || out_sz == 0) { if (out && out_sz) out[0] = '\0'; return; }
+    const char *p = s; int idx = 0; out[0] = '\0';
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        int line_len = 0;
+        const char *wp = p; const char *r = wp;
+        while (r && *r) {
+            int wlen = 0; const char *qq = r; while (*qq && !isspace((unsigned char)*qq)) { wlen++; qq++; }
+            if (line_len == 0) {
+                if (wlen > width) {
+                    // This long word slices into pieces
+                    int pieces = (wlen + width - 1) / width;
+                    int piece = 0; const char *lp = r;
+                    while (piece < pieces) {
+                        int take = (wlen > width) ? width : wlen;
+                                if (idx == target) {
+                                    int len = (take < (int)out_sz - 1) ? take : (int)out_sz - 1;
+                                    snprintf(out, out_sz, "%.*s", len, lp); return;
+                        }
+                        idx++; piece++; lp += take; wlen -= take;
+                    }
+                    // skip the rest of the long word
+                    while (*r && !isspace((unsigned char)*r)) r++;
+                    while (*r && isspace((unsigned char)*r)) r++;
+                    wp = r; line_len = 0; continue;
+                } else { line_len = wlen; r = qq; while (*r && isspace((unsigned char)*r)) r++; }
+            } else {
+                if (line_len + 1 + wlen <= width) { line_len += 1 + wlen; r = qq; while (*r && isspace((unsigned char)*r)) r++; }
+                else break;
+            }
+            if (!*r) break;
+        }
+        // If current concatenation builds a line from wp to r
+        if (idx == target) {
+            int len = (int)(r - wp);
+            if (len >= (int)out_sz) len = (int)out_sz - 1;
+            snprintf(out, out_sz, "%.*s", len, wp); return;
+        }
+        idx++;
+        p = r;
+    }
+    out[0] = '\0';
 }
 
 /* forward declarations */
@@ -512,7 +605,7 @@ static int prompt_input(WINDOW *inputwin, const char *prompt, char *buf, int buf
     // simple inline editor: support left/right cursor, insert/delete, backspace
         // keep a copy of the original so ESC can restore it
         char orig[bufsz];
-        strncpy(orig, buf, bufsz-1); orig[bufsz-1] = '\0';
+        snprintf(orig, bufsz, "%s", buf);
         int len = (int)strlen(buf);
         int pos = len; // cursor position in [0..len]
         wmove(inputwin, 1, base_x + pos);
@@ -523,7 +616,7 @@ static int prompt_input(WINDOW *inputwin, const char *prompt, char *buf, int buf
             ch = wgetch(inputwin);
             if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) break;
             if (ch == 27) { // ESC = cancel (restore original)
-                strncpy(buf, orig, bufsz-1); buf[bufsz-1] = '\0';
+                snprintf(buf, bufsz, "%s", orig);
                 len = (int)strlen(buf); pos = len;
                 // redraw and exit
                 mvwprintw(inputwin,1, base_x, "%s", buf);
@@ -602,6 +695,7 @@ struct sys_arg { char cmd[512]; };
 /* spawn_system_async/worker_system helper removed (unused) */
 
 // Try to start daemon: prefer systemctl (user or system), else try command in PATH, else return failure message
+static void *worker_start_daemon(void *v) __attribute__((unused));
 static void *worker_start_daemon(void *v) {
     (void)v;
     set_last_msg("Starting daemon...");
@@ -816,7 +910,7 @@ static void set_last_msg(const char *fmt, ...) {
     char tmp[512];
     va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
     pthread_mutex_lock(&last_msg_lock);
-    strncpy(last_msg, tmp, sizeof(last_msg)-1);
+    snprintf(last_msg, sizeof(last_msg), "%.255s", tmp);
     last_msg[sizeof(last_msg)-1] = '\0';
     pthread_mutex_unlock(&last_msg_lock);
 }
@@ -833,7 +927,7 @@ char* send_unix_command(const char *cmd) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);
         return NULL;
@@ -870,7 +964,7 @@ static void *worker_run_cmd(void *v) {
     struct worker_arg *a = v;
     // special local commands: __create__<name>\t<smin>\t<smax>\t<tmax>  OR delete:<name>
     if (strncmp(a->cmd, "__create__", 10) == 0) {
-        char buf[512]; strncpy(buf, a->cmd + 10, sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
+        char buf[512]; snprintf(buf, sizeof(buf), "%s", a->cmd + 10);
         char *p = buf;
         char *nm = strtok(p, "\t");
         char *smin = strtok(NULL, "\t");
@@ -900,7 +994,7 @@ static void *worker_run_cmd(void *v) {
 static void spawn_cmd_async(const char *cmd) {
     struct worker_arg *a = calloc(1, sizeof(*a));
     if (!a) return;
-    strncpy(a->cmd, cmd, sizeof(a->cmd)-1);
+    snprintf(a->cmd, sizeof(a->cmd), "%s", cmd);
     pthread_t t;
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&t, &attr, worker_run_cmd, a);
@@ -914,13 +1008,13 @@ static void *worker_fetch_status(void *v) {
     char *r = send_unix_command("status");
     pthread_mutex_lock(&state_lock);
     if (r) {
-        strncpy(status_buf, r, sizeof(status_buf)-1);
+        snprintf(status_buf, sizeof(status_buf), "%s", r);
         status_buf[sizeof(status_buf)-1] = '\0';
         free(r);
         status_ts = time(NULL);
         set_last_msg("Status refreshed");
     } else {
-        strncpy(status_buf, "(daemon unreachable)", sizeof(status_buf)-1);
+        snprintf(status_buf, sizeof(status_buf), "(daemon unreachable)");
         status_buf[sizeof(status_buf)-1] = '\0';
     }
     pthread_mutex_unlock(&state_lock);
@@ -939,13 +1033,13 @@ static void *worker_fetch_zones(void *v) {
     char *r = send_unix_command("zones json");
     pthread_mutex_lock(&state_lock);
     if (r) {
-        strncpy(zones_buf, r, sizeof(zones_buf)-1);
+        snprintf(zones_buf, sizeof(zones_buf), "%s", r);
         zones_buf[sizeof(zones_buf)-1] = '\0';
         free(r);
         zones_ts = time(NULL);
         set_last_msg("Zones refreshed");
     } else {
-        strncpy(zones_buf, "(daemon unreachable)", sizeof(zones_buf)-1);
+        snprintf(zones_buf, sizeof(zones_buf), "(daemon unreachable)");
         zones_buf[sizeof(zones_buf)-1] = '\0';
     }
     pthread_mutex_unlock(&state_lock);
@@ -1009,8 +1103,7 @@ static void *worker_default_skin(void *v) {
     char id[256];
     size_t len = id_end - id_start;
     if (len >= sizeof(id)) len = sizeof(id) - 1;
-    strncpy(id, id_start, len);
-    id[len] = '\0';
+    snprintf(id, sizeof(id), "%.*s", (int)len, id_start);
     free(json);
     // Now deactivate it
     char cmd[512];
@@ -1036,7 +1129,7 @@ static void *worker_install_skin(void *v) {
     if (!base) base = a->path; else base++;
     // Remove .tar.xz if present
     char name[256];
-    strncpy(name, base, sizeof(name)-1);
+    snprintf(name, sizeof(name), "%.255s", base);
     name[sizeof(name)-1] = '\0';
     char *dot = strstr(name, ".tar.xz");
     if (dot) *dot = '\0';
@@ -1070,7 +1163,7 @@ static void *worker_install_skin(void *v) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(sock);
         fclose(f);
@@ -1124,7 +1217,7 @@ static void *worker_install_skin(void *v) {
 
 static void spawn_load_profile_async(const char *name) {
     struct load_arg *a = calloc(1, sizeof(*a)); if (!a) return;
-    strncpy(a->name, name, sizeof(a->name)-1);
+    snprintf(a->name, sizeof(a->name), "%s", name);
     pthread_t t; pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&t, &attr, worker_load_profile, a); pthread_attr_destroy(&attr);
 }
@@ -1136,7 +1229,7 @@ static void spawn_default_skin_async(void) {
 
 static void spawn_install_skin_async(const char *path) {
     struct install_arg *a = calloc(1, sizeof(*a)); if (!a) return;
-    strncpy(a->path, path, sizeof(a->path)-1);
+    snprintf(a->path, sizeof(a->path), "%s", path);
     a->path[sizeof(a->path)-1] = '\0';
     pthread_t t; pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&t, &attr, worker_install_skin, a); pthread_attr_destroy(&attr);
@@ -1155,7 +1248,7 @@ static int ensure_profile_dir(void) {
     char tmp[512];
     snprintf(tmp, sizeof(tmp), "%s", dir);
     // create intermediate .config/cpu_throttle if needed
-    char base[512]; strncpy(base, tmp, sizeof(base));
+    char base[512]; snprintf(base, sizeof(base), "%s", tmp);
     char *p = strstr(base, "/profiles");
     if (p) *p = '\0';
     mkdir(base, 0755);
@@ -1173,8 +1266,7 @@ int read_profiles(char names[][256], int max) {
         size_t len = strlen(line);
         if (len > 0 && line[len-1] == '\r') line[len-1] = '\0';
         if (line[0]) {
-            strncpy(names[i], line, 255);
-            names[i][255] = '\0';
+            snprintf(names[i], sizeof(names[i]), "%.255s", line);
             i++;
         }
         line = strtok(NULL, "\n");
@@ -1191,12 +1283,12 @@ static void *poller_thread(void *v) {
         char *r = send_unix_command("status json");
         pthread_mutex_lock(&state_lock);
         if (r) {
-            strncpy(status_buf, r, sizeof(status_buf)-1);
+            snprintf(status_buf, sizeof(status_buf), "%s", r);
             status_buf[sizeof(status_buf)-1] = '\0';
             free(r);
             status_ts = time(NULL);
         } else {
-            strncpy(status_buf, "(daemon unreachable)", sizeof(status_buf)-1);
+            snprintf(status_buf, sizeof(status_buf), "(daemon unreachable)");
             status_buf[sizeof(status_buf)-1] = '\0';
         }
         pthread_mutex_unlock(&state_lock);
@@ -1205,12 +1297,12 @@ static void *poller_thread(void *v) {
         r = send_unix_command("limits json");
         pthread_mutex_lock(&state_lock);
         if (r) {
-            strncpy(limits_buf, r, sizeof(limits_buf)-1);
+            snprintf(limits_buf, sizeof(limits_buf), "%s", r);
             limits_buf[sizeof(limits_buf)-1] = '\0';
             free(r);
             limits_ts = time(NULL);
         } else {
-            strncpy(limits_buf, "(daemon unreachable)", sizeof(limits_buf)-1);
+            snprintf(limits_buf, sizeof(limits_buf), "(daemon unreachable)");
             limits_buf[sizeof(limits_buf)-1] = '\0';
         }
         pthread_mutex_unlock(&state_lock);
@@ -1219,13 +1311,11 @@ static void *poller_thread(void *v) {
         r = send_unix_command("zones json");
         pthread_mutex_lock(&state_lock);
         if (r) {
-            strncpy(zones_buf, r, sizeof(zones_buf)-1);
-            zones_buf[sizeof(zones_buf)-1] = '\0';
+            snprintf(zones_buf, sizeof(zones_buf), "%s", r);
             free(r);
             zones_ts = time(NULL);
         } else {
-            strncpy(zones_buf, "(daemon unreachable)", sizeof(zones_buf)-1);
-            zones_buf[sizeof(zones_buf)-1] = '\0';
+            snprintf(zones_buf, sizeof(zones_buf), "(daemon unreachable)");
         }
         pthread_mutex_unlock(&state_lock);
 
@@ -1233,13 +1323,11 @@ static void *poller_thread(void *v) {
         r = send_unix_command("list-skins");
         pthread_mutex_lock(&state_lock);
         if (r) {
-            strncpy(skins_buf, r, sizeof(skins_buf)-1);
-            skins_buf[sizeof(skins_buf)-1] = '\0';
+            snprintf(skins_buf, sizeof(skins_buf), "%s", r);
             free(r);
             skins_ts = time(NULL);
         } else {
-            strncpy(skins_buf, "(daemon unreachable)", sizeof(skins_buf)-1);
-            skins_buf[sizeof(skins_buf)-1] = '\0';
+            snprintf(skins_buf, sizeof(skins_buf), "(daemon unreachable)");
         }
         pthread_mutex_unlock(&state_lock);
 
@@ -1253,7 +1341,7 @@ static void *poller_thread(void *v) {
 // Load profile: send load-profile command to daemon
 int load_profile_by_name(const char *name) {
     char cmd[128];
-    snprintf(cmd, sizeof(cmd), "load-profile %s", name);
+    snprintf(cmd, sizeof(cmd), "load-profile %.114s", name);
     char *r = send_unix_command(cmd);
     if (r) free(r);
     return 0; // assume success if no error
@@ -1296,6 +1384,8 @@ int main() {
     // init colors (no longer track a use_colors variable)
     if (has_colors()) { start_color(); init_pair(1, COLOR_GREEN, -1); init_pair(2, COLOR_YELLOW, -1); init_pair(3, COLOR_RED, -1); }
     getmaxyx(stdscr, height, width);
+    // Show the help pane by default when the terminal width is large enough
+    if (width >= 100) help_visible = 1;
     WINDOW *status = newwin(7, width-2, 1, 1);
     int data_w = help_visible ? (width - 44) : (width - 2);
     if (data_w < 20) data_w = 20;
@@ -1314,7 +1404,7 @@ int main() {
     pthread_t poller;
     if (pthread_create(&poller, NULL, poller_thread, NULL) != 0) {
         // failed to start poller, continue but UI will show no updates
-        pthread_mutex_lock(&state_lock); strncpy(status_buf, "(poller failed)", sizeof(status_buf)-1); pthread_mutex_unlock(&state_lock);
+        pthread_mutex_lock(&state_lock); snprintf(status_buf, sizeof(status_buf), "(poller failed)"); pthread_mutex_unlock(&state_lock);
     }
 
     char profs[256][256]; int prof_count = 0; int sel = 0; int offset = 0;
@@ -1359,11 +1449,11 @@ int main() {
         mvwprintw(status, 0,2," Status ");
         // display cached status (updated by poller)
         pthread_mutex_lock(&state_lock);
-        char local_status[4096]; strncpy(local_status, status_buf, sizeof(local_status)-1); local_status[sizeof(local_status)-1]='\0';
+        char local_status[4096]; snprintf(local_status, sizeof(local_status), "%s", status_buf);
         time_t ts = status_ts;
         pthread_mutex_unlock(&state_lock);
         char local_msg[256];
-        pthread_mutex_lock(&last_msg_lock); strncpy(local_msg, last_msg, sizeof(local_msg)-1); local_msg[sizeof(local_msg)-1]='\0'; pthread_mutex_unlock(&last_msg_lock);
+        pthread_mutex_lock(&last_msg_lock); snprintf(local_msg, sizeof(local_msg), "%.200s", last_msg); pthread_mutex_unlock(&last_msg_lock);
         // print response lines
         int cur_avg = get_use_avg_temp();
         // Prepare pretty printed status if JSON, and compute columns dynamically
@@ -1371,16 +1461,12 @@ int main() {
         char status_summary[4096]; status_summary[0] = '\0';
         if (local_status[0] == '{' || local_status[0] == '[') {
             // Keep pretty JSON for raw popup
-            strncpy(pretty_status, pretty_print_json(local_status), sizeof(pretty_status)-1);
-            pretty_status[sizeof(pretty_status)-1] = '\0';
+            snprintf(pretty_status, sizeof(pretty_status), "%s", pretty_print_json(local_status));
             // Use key/value formatted string with units for the left pane
-            strncpy(status_summary, format_status_kv(local_status), sizeof(status_summary)-1);
-            status_summary[sizeof(status_summary)-1] = '\0';
+            snprintf(status_summary, sizeof(status_summary), "%s", format_status_kv(local_status));
         } else {
-            strncpy(pretty_status, local_status, sizeof(pretty_status)-1);
-            pretty_status[sizeof(pretty_status)-1] = '\0';
-            strncpy(status_summary, local_status, sizeof(status_summary)-1);
-            status_summary[sizeof(status_summary)-1] = '\0';
+            snprintf(pretty_status, sizeof(pretty_status), "%s", local_status);
+            snprintf(status_summary, sizeof(status_summary), "%s", local_status);
         }
         int maxx_status = getmaxx(status);
         int h_status = getmaxy(status);
@@ -1441,7 +1527,7 @@ int main() {
             box(rawwin, 0, 0);
             mvwprintw(rawwin, 0, 2, " Status JSON (press any key to close) ");
             // print the pretty_status lines into the popup
-            int row = 1; char bufcopy[4096]; strncpy(bufcopy, pretty_status, sizeof(bufcopy)-1); bufcopy[sizeof(bufcopy)-1] = '\0';
+            int row = 1; char bufcopy[4096]; snprintf(bufcopy, sizeof(bufcopy), "%s", pretty_status);
             char *save = NULL; char *linep = strtok_r(bufcopy, "\n", &save);
             while (linep && row < raw_h - 1) {
                 mvwprintw(rawwin, row, 2, "%.*s", raw_w - 4, linep);
@@ -1472,7 +1558,7 @@ int main() {
         int page_lines = (height-13) - 2;
             if (current_mode == 0) { // Limits
             pthread_mutex_lock(&state_lock);
-            char local_limits[4096]; strncpy(local_limits, limits_buf, sizeof(local_limits)-1); local_limits[sizeof(local_limits)-1]='\0';
+            char local_limits[4096]; snprintf(local_limits, sizeof(local_limits), "%s", limits_buf);
             time_t ts = limits_ts;
             pthread_mutex_unlock(&state_lock);
             char *pretty = format_limits_zones(local_limits, 1);
@@ -1480,7 +1566,7 @@ int main() {
             // Build list of lines to track selection index
             char lines_buf[256][256]; limits_count = 0;
             while (p && limits_count < (int)(sizeof(lines_buf)/sizeof(lines_buf[0]))) {
-                strncpy(lines_buf[limits_count], p, sizeof(lines_buf[0])-1); lines_buf[limits_count][sizeof(lines_buf[0])-1] = '\0';
+                snprintf(lines_buf[limits_count], sizeof(lines_buf[0]), "%s", p);
                 limits_count++; p = strtok_r(NULL, "\n", &saveptr);
             }
             if (limits_sel >= limits_count) limits_sel = limits_count > 0 ? limits_count - 1 : 0;
@@ -1498,7 +1584,7 @@ int main() {
             (void)ts;
         } else if (current_mode == 1) { // Zones
             pthread_mutex_lock(&state_lock);
-            char local_zones[4096]; strncpy(local_zones, zones_buf, sizeof(local_zones)-1); local_zones[sizeof(local_zones)-1]='\0';
+            char local_zones[4096]; snprintf(local_zones, sizeof(local_zones), "%s", zones_buf);
             time_t ts = zones_ts;
             pthread_mutex_unlock(&state_lock);
             zones_count = 0; // reset before parsing
@@ -1522,14 +1608,14 @@ int main() {
             (void)ts;
         } else if (current_mode == 3) { // Skins
             pthread_mutex_lock(&state_lock);
-            char local_skins[4096]; strncpy(local_skins, skins_buf, sizeof(local_skins)-1); local_skins[sizeof(local_skins)-1]='\0';
+            char local_skins[4096]; snprintf(local_skins, sizeof(local_skins), "%s", skins_buf);
             time_t ts = skins_ts;
             pthread_mutex_unlock(&state_lock);
             // parse skins list
             skins_count = 0;
             char *saveptr = NULL; char *p = strtok_r(local_skins, "\n", &saveptr);
             while (p && skins_count < 256) {
-                strncpy(skins_list[skins_count], p, 255); skins_list[skins_count][255] = '\0';
+                snprintf(skins_list[skins_count], sizeof(skins_list[0]), "%.255s", p);
                 skins_count++;
                 p = strtok_r(NULL, "\n", &saveptr);
             }
@@ -1553,7 +1639,7 @@ int main() {
             display_count = 0;
             for (int i = 0; i < prof_count; ++i) {
                 if (profile_filter[0] == '\0' || strstr(profs[i], profile_filter)) {
-                    strncpy(display_profs[display_count], profs[i], 255); display_profs[display_count][255] = '\0'; display_count++;
+                    snprintf(display_profs[display_count], sizeof(display_profs[0]), "%.255s", profs[i]); display_count++;
                 }
             }
             if (sel < 0) sel = 0;
@@ -1573,74 +1659,108 @@ int main() {
         wrefresh(data);
 
         if (help_visible) {
-            // paginated help content
-            const char *help_lines[] = {
+            // paginated, wrapped help content: core + mode-specific
+            const char *core_lines[] = {
                 "h/H/? : toggle help",
                 "Tab : switch mode (Limits/Zones/Skins/Profiles)",
-                "r : refresh data",
-                "UP/DN : select item (in Profiles mode)",
-                "/ : filter profiles (in Profiles mode)",
-                "g : clear filter (in Profiles mode)",
-                "l : load selected profile (in Profiles mode)",
-                "c : create profile (in Profiles mode)",
-                "e : edit selected profile (in Profiles mode)",
-                "d : delete selected profile (in Profiles mode)",
-                "s/m/t : set safe-max/safe-min/temp-max (in Limits mode)",
-                "i : install skin | d : reset to default | a : activate | u : deactivate (in Skins mode)",
-                "UP/DN : select zone (in Zones mode)",
-                "x : toggle exclude for selected zone (in Zones mode)",
-                "v : toggle use average temp (in Zones mode)",
-                "Left/Right arrows: horiz scroll selected/active line | f : view full line",
-                "D : stop daemon | S : start daemon | R : view raw status",
+                "f : Show full-line popup (press any key to dismiss)",
+                "r : Manual refresh (fetch data from daemon)",
+                "R : Toggle raw status JSON (popup)",
+                "S : Start/Restart daemon (systemctl restart, may require sudo)",
+                "D : Stop daemon (send quit to daemon)",
                 "q : quit",
                 "Space/PageDown : next page | PageUp/p : previous page",
             };
-            int help_count = sizeof(help_lines)/sizeof(help_lines[0]);
-            werase(helpwin); box(helpwin,0,0); mvwprintw(helpwin,0,2," Help ");
-            (void)getmaxx(helpwin); // intentionally unused; keep call for completeness
-            int hh = getmaxy(helpwin);
-            int page_lines = hh - 2; // available lines inside box
+            const char *limits_lines[] = {
+                "Limits mode commands:",
+                "s : set safe_max",
+                "m : set safe_min",
+                "t : set temp_max",
+            };
+            const char *zones_lines[] = {
+                "Zones mode commands:",
+                "UP/DN : select zone",
+                "x : toggle exclude for selected zone",
+                "v : toggle use average temp",
+                "Left/Right: horiz scroll selected line | f: view full line",
+            };
+            const char *profiles_lines[] = {
+                "Profiles mode commands:",
+                "l : load selected profile",
+                "c : create profile",
+                "e : edit selected profile",
+                "d : delete selected profile",
+                "/ : filter profiles | g : clear filter",
+            };
+            const char *skins_lines[] = {
+                "Skins mode commands:",
+                "i : install skin archive",
+                "x : delete selected skin",
+                "d : reset to default skin",
+                "a : activate skin | u : deactivate skin",
+            };
+            const char **mode_lines = NULL; int mode_count = 0;
+            if (current_mode == 0) { mode_lines = limits_lines; mode_count = sizeof(limits_lines)/sizeof(limits_lines[0]); }
+            else if (current_mode == 1) { mode_lines = zones_lines; mode_count = sizeof(zones_lines)/sizeof(zones_lines[0]); }
+            else if (current_mode == 2) { mode_lines = profiles_lines; mode_count = sizeof(profiles_lines)/sizeof(profiles_lines[0]); }
+            else if (current_mode == 3) { mode_lines = skins_lines; mode_count = sizeof(skins_lines)/sizeof(skins_lines[0]); }
+
+            werase(helpwin);
+            box(helpwin,0,0); mvwprintw(helpwin,0,2," Help (%s) ", mode_names[current_mode]);
+            int hh = getmaxy(helpwin); int hw = getmaxx(helpwin) - 4; if (hw < 10) hw = 10;
+            int page_lines = hh - 3;
+            int total_wrapped = 0;
+            for (int i = 0; i < (int)(sizeof(core_lines)/sizeof(core_lines[0])); ++i) total_wrapped += wrapped_count(core_lines[i], hw);
+            for (int i = 0; i < mode_count; ++i) total_wrapped += wrapped_count(mode_lines[i], hw);
             if (help_offset < 0) help_offset = 0;
-            if (help_offset >= help_count) help_offset = (help_count - 1) / page_lines * page_lines;
-            int idx = help_offset;
-            int row = 1;
-            while (idx < help_count && row <= page_lines) {
-                mvwprintw(helpwin, row, 2, "%s", help_lines[idx]);
-                idx++; row++;
+            if (help_offset >= total_wrapped) help_offset = (total_wrapped - 1) / page_lines * page_lines;
+            int cur_idx = 0; int row = 1;
+            for (int i = 0; i < (int)(sizeof(core_lines)/sizeof(core_lines[0])) && row <= page_lines; ++i) {
+                int nwr = wrapped_count(core_lines[i], hw);
+                for (int j = 0; j < nwr && row <= page_lines; ++j) {
+                    if (cur_idx >= help_offset) { char out[512]; get_wrapped_line(core_lines[i], hw, j, out, sizeof(out)); mvwprintw(helpwin, row, 2, "%s", out); row++; }
+                    cur_idx++;
+                }
             }
-            // footer hint if more pages
-            if (help_offset + page_lines < help_count) mvwprintw(helpwin, hh-1, 2, "-- more: Space/PageDown --");
+            for (int i = 0; i < mode_count && row <= page_lines; ++i) {
+                int nwr = wrapped_count(mode_lines[i], hw);
+                for (int j = 0; j < nwr && row <= page_lines; ++j) {
+                    if (cur_idx >= help_offset) { char out[512]; get_wrapped_line(mode_lines[i], hw, j, out, sizeof(out)); mvwprintw(helpwin, row, 2, "%s", out); row++; }
+                    cur_idx++;
+                }
+            }
+            if (help_offset + page_lines < total_wrapped) mvwprintw(helpwin, hh-1, 2, "-- more: Space/PageDown --");
             else mvwprintw(helpwin, hh-1, 2, "-- end --");
             wrefresh(helpwin);
         }
         // footer with last message: render in footer window so it's independent of other windows
         werase(footerwin);
         {
-            char msg[256]; snprintf(msg, sizeof(msg), "Msg: %s", local_msg);
+            char msg[256]; snprintf(msg, sizeof(msg), "Msg: %.200s", local_msg);
             mvwprintw(footerwin, 0, 1, "%.*s", width - 2, msg);
         }
             if (current_mode == 2) { // Profiles
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | l load | c create | e edit | d delete | / filter | g clear | q quit | R raw status | Left/Right | f");
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | l load | c create | e edit | d delete | / filter | g clear | q quit | R raw status | S start | Left/Right | f");
             const char* ks_short = "  Keys: h help | Tab mode | l load | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
         } else if (current_mode == 0) { // Limits
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | s/m/t set limits | D stop | q quit | R raw status | Left/Right | f");
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | s/m/t set limits | D stop | S start | q quit | R raw status | Left/Right | f");
             const char* ks_short = "  Keys: h help | Tab mode | s/t set limits | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
         } else if (current_mode == 3) { // Skins
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | i install | d default | a activate | u deactivate | q quit | R raw status | Left/Right | f");
-            const char* ks_short = "  Keys: h help | Tab mode | i install | q quit | f";
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | i install | x delete | d default | a activate | u deactivate | q quit | R raw status | S start | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | i install | x delete | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
         } else if (current_mode == 1) { // Zones
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | UP/DN nav | x toggle exclude | v toggle avg temp | q quit | R raw status | Left/Right | f");
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | UP/DN nav | x toggle exclude | v toggle avg temp | q quit | R raw status | S start | Left/Right | f");
             const char* ks_short = "  Keys: h help | Tab mode | r refresh | UP/DN | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
         } else {
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | r refresh | D stop | q quit | R raw status | Left/Right | f");
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | r refresh | D stop | S start | q quit | R raw status | Left/Right | f");
             const char* ks_short = "  Keys: h help | Tab mode | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
@@ -1674,11 +1794,11 @@ int main() {
         }
         else if (help_visible && (ch == ' ' || ch == KEY_NPAGE || ch == 'n')) {
             // next page
-            help_offset += (getmaxy(helpwin) - 2);
+            help_offset += (getmaxy(helpwin) - 3);
             continue;
         } else if (help_visible && (ch == KEY_PPAGE || ch == 'p')) {
             // previous page
-            help_offset -= (getmaxy(helpwin) - 2);
+            help_offset -= (getmaxy(helpwin) - 3);
             if (help_offset < 0) help_offset = 0;
             continue;
         }
@@ -1709,19 +1829,19 @@ int main() {
                 box(pwin,0,0); mvwprintw(pwin,1,2, "%s", s); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
             } else if (current_mode == 0) {
                 pthread_mutex_lock(&state_lock);
-                char local_limits[4096]; strncpy(local_limits, limits_buf, sizeof(local_limits)-1); local_limits[sizeof(local_limits)-1] = '\0';
+                char local_limits[4096]; snprintf(local_limits, sizeof(local_limits), "%s", limits_buf);
                 pthread_mutex_unlock(&state_lock);
                 char *pretty = format_limits_zones(local_limits, 1);
                 // If limits selection exists show selected line, else show full pretty output
                 if (limits_count > 0 && limits_sel >= 0 && limits_sel < limits_count) {
                     char bufsel[512] = "";
-                    char tmp[4096]; strncpy(tmp, pretty, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0'; char *sp = NULL; char *pp = strtok_r(tmp, "\n", &sp);
+                    char tmp[4096]; snprintf(tmp, sizeof(tmp), "%s", pretty); char *sp = NULL; char *pp = strtok_r(tmp, "\n", &sp);
                     int idx = 0;
                     while (pp) {
-                        if (idx == limits_sel) { strncpy(bufsel, pp, sizeof(bufsel)-1); bufsel[sizeof(bufsel)-1] = '\0'; break; }
+                        if (idx == limits_sel) { snprintf(bufsel, sizeof(bufsel), "%s", pp); break; }
                         idx++; pp = strtok_r(NULL, "\n", &sp);
                     }
-                    if (bufsel[0] == '\0') strncpy(bufsel, "(not available)", sizeof(bufsel)-1);
+                    if (bufsel[0] == '\0') snprintf(bufsel, sizeof(bufsel), "%s", "(not available)");
                     int pw = getmaxx(stdscr)-4; int len = (int)strlen(bufsel) + 4; if (len < 20) len = 20; if (pw > len) pw = len; int ph = 6;
                     WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
                     box(pwin,0,0); mvwprintw(pwin,1,2, "%s", bufsel); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
@@ -1729,7 +1849,7 @@ int main() {
                     int pw = getmaxx(stdscr)-4; if (pw > 80) pw = 80; int tmpcalc = (int)strlen(pretty) / ((pw - 4) > 0 ? (pw - 4) : 1) + 4; if (tmpcalc > 30) tmpcalc = 30; int ph = tmpcalc;
                     WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
                     box(pwin,0,0);
-                    int r = 1; char tmp2[4096]; strncpy(tmp2, pretty, sizeof(tmp2)-1); tmp2[sizeof(tmp2)-1] = '\0'; char *sp = NULL; char *pp = strtok_r(tmp2, "\n", &sp);
+                    int r = 1; char tmp2[4096]; snprintf(tmp2, sizeof(tmp2), "%s", pretty); char *sp = NULL; char *pp = strtok_r(tmp2, "\n", &sp);
                     while (pp && r < ph-1) { mvwprintw(pwin, r, 2, "%.*s", pw-4, pp); pp = strtok_r(NULL, "\n", &sp); r++; }
                     mvwprintw(pwin, ph-2, 2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
                 }
@@ -1741,7 +1861,7 @@ int main() {
             if (zones_count == 0) { set_last_msg("No zones to toggle"); }
             else {
                 // Determine token to toggle (normalize zone type)
-                char token[128]; strncpy(token, zones_arr[zones_sel].type, sizeof(token)-1); token[sizeof(token)-1] = '\0';
+                char token[128]; snprintf(token, sizeof(token), "%s", zones_arr[zones_sel].type);
                 // trim and lowercase
                 char *s = token; while (*s && isspace((unsigned char)*s)) s++; char *e = s + strlen(s) - 1; while (e > s && isspace((unsigned char)*e)) { *e = '\0'; e--; }
                 for (char *p = s; *p; ++p) *p = tolower((unsigned char)*p);
@@ -1758,24 +1878,24 @@ int main() {
                 // Parse CSV into list and dedupe
                 char tokens[64][128]; int token_count = 0;
                 if (existing_csv[0]) {
-                    char tmp[1024]; strncpy(tmp, existing_csv, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+                    char tmp[1024]; snprintf(tmp, sizeof(tmp), "%s", existing_csv);
                     char *tok = strtok(tmp, ",");
                     while (tok) {
                         // trim and lowercase
-                        char tk[128]; strncpy(tk, tok, sizeof(tk)-1); tk[sizeof(tk)-1] = '\0';
+                        char tk[128]; snprintf(tk, sizeof(tk), "%s", tok);
                         char *tk_s = tk; while (*tk_s && isspace((unsigned char)*tk_s)) tk_s++; char *tk_e = tk_s + strlen(tk_s) - 1; while (tk_e > tk_s && isspace((unsigned char)*tk_e)) { *tk_e = '\0'; tk_e--; }
                         for (char *p = tk_s; *p; ++p) *p = tolower((unsigned char)*p);
                         if (tk_s && *tk_s) {
                             int found = 0; for (int i = 0; i < token_count; ++i) { if (strcmp(tokens[i], tk_s) == 0) { found = 1; break; } }
-                            if (!found && token_count < (int)(sizeof(tokens)/sizeof(tokens[0]))) { strncpy(tokens[token_count], tk_s, sizeof(tokens[0])-1); tokens[token_count][sizeof(tokens[0])-1] = '\0'; token_count++; }
+                            if (!found && token_count < (int)(sizeof(tokens)/sizeof(tokens[0]))) { snprintf(tokens[token_count], sizeof(tokens[0]), "%s", tk_s); token_count++; }
                         }
                         tok = strtok(NULL, ",");
                     }
                 }
                 // check if token is present; toggle: remove if present, add if not
-                int present = 0; for (int i = 0; i < token_count; ++i) { if (strcmp(tokens[i], s) == 0) { present = 1; /* remove */ for (int k = i; k + 1 < token_count; ++k) strncpy(tokens[k], tokens[k+1], sizeof(tokens[0])-1); token_count--; break; } }
+                int present = 0; for (int i = 0; i < token_count; ++i) { if (strcmp(tokens[i], s) == 0) { present = 1; /* remove */ for (int k = i; k + 1 < token_count; ++k) snprintf(tokens[k], sizeof(tokens[0]), "%s", tokens[k+1]); token_count--; break; } }
                 if (!present) {
-                    if (token_count < (int)(sizeof(tokens)/sizeof(tokens[0]))) { strncpy(tokens[token_count], s, sizeof(tokens[0])-1); tokens[token_count][sizeof(tokens[0])-1] = '\0'; token_count++; }
+                    if (token_count < (int)(sizeof(tokens)/sizeof(tokens[0]))) { snprintf(tokens[token_count], sizeof(tokens[0]), "%s", s); token_count++; }
                 }
                 else {
                     // removed by exact match; present==1 and token removed above
@@ -1786,7 +1906,7 @@ int main() {
                     for (int i = 0; i < token_count; ++i) {
                         if (strstr(s, tokens[i])) {
                             // remove tokens[i]
-                            for (int k = i; k + 1 < token_count; ++k) strncpy(tokens[k], tokens[k+1], sizeof(tokens[0])-1);
+                            for (int k = i; k + 1 < token_count; ++k) snprintf(tokens[k], sizeof(tokens[0]), "%s", tokens[k+1]);
                             token_count--; i--; removed_any = 1;
                         }
                     }
@@ -1826,7 +1946,7 @@ int main() {
                 }
                 if (r) {
                     pthread_mutex_lock(&state_lock);
-                    strncpy(status_buf, r, sizeof(status_buf)-1);
+                    snprintf(status_buf, sizeof(status_buf), "%s", r);
                     status_buf[sizeof(status_buf)-1] = '\0';
                     free(r);
                     status_ts = time(NULL);
@@ -1888,9 +2008,9 @@ int main() {
                     while (fgets(line, sizeof(line), f)) {
                         char key[64], val[64];
                         if (sscanf(line, "%63[^=]=%63s", key, val) == 2) {
-                            if (strcmp(key, "safe_min") == 0) strncpy(cur_smin, val, sizeof(cur_smin)-1);
-                            else if (strcmp(key, "safe_max") == 0) strncpy(cur_smax, val, sizeof(cur_smax)-1);
-                            else if (strcmp(key, "temp_max") == 0) strncpy(cur_tmax, val, sizeof(cur_tmax)-1);
+                            if (strcmp(key, "safe_min") == 0) snprintf(cur_smin, sizeof(cur_smin), "%s", val);
+                            else if (strcmp(key, "safe_max") == 0) snprintf(cur_smax, sizeof(cur_smax), "%s", val);
+                            else if (strcmp(key, "temp_max") == 0) snprintf(cur_tmax, sizeof(cur_tmax), "%s", val);
                         }
                     }
                     fclose(f);
@@ -1918,8 +2038,7 @@ int main() {
             // filter profiles
             char f[128] = {0};
             if (prompt_input(inputwin, "Filter profiles (substring, empty to clear): ", f, sizeof(f)) >= 0) {
-                strncpy(profile_filter, f, sizeof(profile_filter)-1);
-                profile_filter[sizeof(profile_filter)-1] = '\0';
+                snprintf(profile_filter, sizeof(profile_filter), "%s", f);
                 sel = 0; offset = 0;
                 set_last_msg("Filter applied");
             }
@@ -2059,6 +2178,16 @@ int main() {
     // stop poller and cleanup windows
     keep_running = 0;
     pthread_join(poller, NULL);
-    delwin(status); delwin(data); delwin(helpwin); delwin(inputwin); endwin();
+    if (status) delwin(status);
+    if (data) delwin(data);
+    if (helpwin) delwin(helpwin);
+    if (inputwin) delwin(inputwin);
+    if (footerwin) delwin(footerwin);
+    // ensure the terminal is cleaned up and cursor restored
+    curs_set(1);
+    clear(); refresh();
+    endwin();
+    // newline to avoid leftovers on the prompt line
+    printf("\n"); fflush(stdout);
     return 0;
 }
