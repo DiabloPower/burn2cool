@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check if running as root, if not, restart with sudo
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script requires root privileges. Restarting with sudo..."
-    exec sudo "$0" "$@"
-fi
-
 # If executed remotely (via curl), download and execute locally to avoid issues
 if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH_SOURCE[0]}" == http* ]]; then
     echo "Remote execution detected - downloading script locally for proper execution..."
-    
+
     # Create temp directory
     TEMP_DIR=$(mktemp -d)
     SCRIPT_PATH="$TEMP_DIR/install_cpu-throttle.sh"
-    
+
     # Download the script using GitHub API to avoid caching issues
     if command -v curl >/dev/null 2>&1; then
         DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/DiabloPower/burn2cool/contents/install_cpu-throttle.sh" | sed -n 's/.*"download_url": "\([^"]*\)".*/\1/p')
@@ -36,7 +30,7 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
         echo "ERROR: Neither curl nor wget available for downloading script"
         exit 1
     fi
-    
+
     # Make executable and run locally
     chmod +x "$SCRIPT_PATH"
     # Mark that this is a temp execution for cleanup
@@ -44,6 +38,12 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
     export BURN2COOL_TEMP_DIR="$TEMP_DIR"
     exec "$SCRIPT_PATH" "$@"
     exit 0
+fi
+
+# Check if running as root, if not, restart with sudo
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script requires root privileges. Restarting with sudo..."
+    exec sudo "$0" "$@"
 fi
 
 # Ignore SIGTERM to prevent remote termination
@@ -67,6 +67,9 @@ TUI_BUILD_NAME="$TUI_BIN_NAME"
 DEAMON_PATH="/usr/local/bin/$BINARY_NAME"
 DEAMON_CTL_PATH="/usr/local/bin/$CTL_BINARY_NAME"
 TUI_BUILD_PATH="/usr/local/bin/$TUI_BIN_NAME"
+
+# Path to config file (should match daemon's CONFIG_FILE)
+CONFIG_FILE="/etc/cpu_throttle.conf"
 
 SERVICE_PATH="/etc/systemd/system/$BINARY_NAME.service"
 BUILD_PATH="$DEAMON_PATH" # For compatibility with provided service template
@@ -164,8 +167,10 @@ while (( "$#" )); do
     --release-tag) RELEASE_TAG="${2:-}"; shift ;;
     --fetch-url) FETCH_URL="${2:-}"; shift ;;
     --quiet) QUIET=1 ;;
+    --install-skin) INSTALL_SKIN_ARCHIVE="${2:-}"; shift ;;
     --debug-install) DEBUG_INSTALL=1 ;;
     --web-port) WEB_ENABLE=1; WEB_PORT="${2:-}"; shift ;;
+    --enable-firewall) ENABLE_FIREWALL=1 ;;
     --help|-h)
       cat <<USAGE
 Usage: $(basename "$0") [options]
@@ -179,6 +184,7 @@ Usage: $(basename "$0") [options]
   --quiet                          Reduce output
   --debug-install                  Save debug artifacts to /tmp
   --web-port <port>                Enable web API with a specific port
+  --enable-firewall                Enable firewall port configuration
 USAGE
       exit 0
       ;;
@@ -197,14 +203,16 @@ log "===========================================================================
 log " Burn2Cool installer for ${BINARY_NAME} (temperature-based CPU governor)"
 log " Repo: https://github.com/${REPO_OWNER}/${REPO_NAME}"
 log " This will:"
-log "  - Interactively select components (daemon, ctl, tui, gui, web API, firewall)"
+log "  - Interactively select components (daemon, ctl, tui, gui, web API*, firewall**)"
 log "  - Download prebuilt binaries or build from source"
 log "  - Install dependencies automatically (if supported)"
 log "  - Stage files in a temp dir for processing"
 log "  - Stop any running services and install new binaries"
-log "  - Configure web API and firewall (if selected)"
+log "  - Configure web API* and firewall** (if selected)"
 log "  - Install GUI components and create desktop entries"
 log "  - Create/refresh systemd service and start it"
+log "  * Web API enabled by default for local access"
+log "  ** Firewall requires explicit --enable-firewall flag"
 log "=============================================================================="
 
 # =========================
@@ -272,7 +280,10 @@ install_deps() {
 regenerate_asset_headers() {
   local assets_dir="assets"
   local include_dir="include"
+  # Ensure include dir exists and remove any stale generated headers so they
+  # will be recreated cleanly by xxd or make assets.
   mkdir -p "$include_dir"
+  rm -f "$include_dir/index_html.h" "$include_dir/main_js.h" "$include_dir/styles_css.h" "$include_dir/favicon_ico.h" "$include_dir/assets_generated.h" || true
   if command -v xxd >/dev/null 2>&1; then
     log "Generating asset headers with xxd"
     xxd -i "$assets_dir/index.html" > "$include_dir/index_html.h" || return 1
@@ -286,6 +297,7 @@ regenerate_asset_headers() {
   cat > "$include_dir/assets_generated.h" <<'H'
 #define USE_ASSET_HEADERS 1
 H
+  log "Wrote include/assets_generated.h and set USE_ASSET_HEADERS"
   return 0
 }
 
@@ -481,13 +493,27 @@ _multiselect_menu() {
 
 # Present interactive component selection and populate WANT_* globals
 component_selection() {
-  # Defaults: select all when non-interactive flag is set
+  # Check if this is an existing installation (for backward compatibility)
+  local existing_install=0
+  if [ -f "/etc/cpu_throttle.conf" ] || [ -f "/usr/local/bin/cpu_throttle" ] || systemctl is-active --quiet cpu_throttle 2>/dev/null; then
+    existing_install=1
+    log "Existing installation detected - using conservative defaults for compatibility"
+  fi
+  
+  # Defaults: web API enabled for new installs, disabled for existing (backward compatibility)
   local options=("daemon (cpu_throttle)" "ctl (cpu_throttle_ctl)" "tui (cpu_throttle_tui)" "gui (GUI zip)" "--- Settings ---" "web API" "firewall ports" "systemd service")
-  local defaults=("true" "true" "true" "true" "false" "false" "false" "false")
+  local defaults=("true" "true" "true" "true" "false" "true" "false" "false")
+  if [ "$existing_install" -eq 1 ]; then
+    defaults=("true" "true" "true" "true" "false" "false" "false" "false")
+  fi
+  
   local selected=()
   if [ "${YES:-0}" -eq 1 ] || [ "${AUTO_YES:-0}" -eq 1 ]; then
-    # keep defaults true
-    selected=("true" "true" "true" "true" "false" "true" "true" "true")
+    # For non-interactive: use defaults, but firewall false unless explicitly enabled
+    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "${defaults[5]}" "false" "${defaults[7]}")
+    if [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then
+      selected[6]="true"
+    fi
   else
     # Offer a quick single-select first (download mode), then component multiselect
     printf "Select download mode:\nUse arrow keys to navigate, Space to toggle, Enter to confirm, q to quit.\n\n"
@@ -518,7 +544,7 @@ component_selection() {
   if [ "${selected[2]}" = "true" ]; then WANT_TUI=1; fi
   if [ "${selected[3]}" = "true" ]; then WANT_GUI=1; fi
   if [ "${selected[5]}" = "true" ]; then WANT_WEB=1; fi
-  if [ "${selected[6]}" = "true" ]; then WANT_FIREWALL=1; fi
+  if [ "${selected[6]}" = "true" ] || [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then WANT_FIREWALL=1; fi
   if [ "${selected[7]}" = "true" ]; then WANT_SERVICE=1; fi
 
   log "Component selection: daemon=$WANT_DAEMON ctl=$WANT_CTL tui=$WANT_TUI gui=$WANT_GUI web=$WANT_WEB firewall=$WANT_FIREWALL service=$WANT_SERVICE"
@@ -782,8 +808,13 @@ download_source_and_build() {
   log "Building from source with make..."
   # Attempt to regenerate asset headers in source tree; if successful,
   # remove pre-generated headers so make assets will recreate them.
+  # Attempt to regenerate asset headers in source tree so the build embeds the
+  # generated header arrays. This ensures the resulting binary will include the
+  # assets by default (single-file binary). If xxd is missing and generation
+  # fails, the build will still continue and fallback to existing headers or
+  # serving from disk depending on build options.
   if (cd "$src_dir" && regenerate_asset_headers); then
-    log "Regenerated asset headers in source tree"
+    log "Regenerated asset headers in source tree (embedded assets will be compiled in)"
   else
     log "Using existing asset headers if present"
   fi
@@ -794,6 +825,9 @@ download_source_and_build() {
     else
       MAKE_SHELL_ARG=""
     fi
+    # Ensure the assets target runs so the headers are recreated by the Make
+    # pipeline. This step is intentionally tolerant of failures so the build
+    # proceeds even on systems without xxd (fallback to include/ if available).
     (cd "$src_dir" && if make $MAKE_SHELL_ARG assets 2>/dev/null || true; then true; fi)
     (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" )
   else
@@ -902,6 +936,46 @@ download_source_and_build() {
     (cd "$src_dir" && [ -d include ] && tar -c --xz -f "$DEBUG_DIR/include.txz" include) || true
     (cd "$WORK_DIR" && sha256sum * > "$DEBUG_DIR/sha256.sum") || true
   fi
+}
+
+install_skin_archive() {
+  local archive="$1"
+  if [ -z "$archive" ]; then
+    err "No archive specified for skin installation"
+    return 1
+  fi
+  log "Installing skin from archive: $archive"
+  local staging="$WORK_DIR/skin_staging"
+  rm -rf "$staging" && mkdir -p "$staging"
+  case "$archive" in
+    *.tar.gz|*.tgz)
+      tar -xzf "$archive" -C "$staging" || { err "Failed to extract tar.gz"; return 1; } ;;
+    *.zip)
+      unzip -q "$archive" -d "$staging" || { err "Failed to extract zip"; return 1; } ;;
+    *)
+      err "Unknown archive type: $archive"; return 1 ;;
+  esac
+  # find manifest.json
+  local manifest
+  manifest=$(find "$staging" -maxdepth 3 -type f -name manifest.json | head -n1 || true)
+  if [ -z "$manifest" ]; then
+    err "manifest.json not found in skin archive"; return 1
+  fi
+  # read id from manifest (simple jq-free parse)
+  local skin_id
+  skin_id=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' "$manifest" | head -n1 || true)
+  if [ -z "$skin_id" ]; then
+    # fallback to directory name
+    skin_id=$(basename "$(dirname "$manifest")")
+  fi
+  local install_dir="/usr/local/share/burn2cool/skins/$skin_id"
+  sudo mkdir -p "$install_dir"
+  sudo rm -rf "$install_dir/"*
+  sudo cp -a "$staging/." "$install_dir/"
+  sudo chown -R root:root "$install_dir"
+  log "Skin installed to: $install_dir"
+  echo "$skin_id"
+  return 0
 }
 
 download_explicit_url() {
@@ -1293,19 +1367,73 @@ EOF
   fi
 fi
 
+# If requested, install a skin archive
+if [ -n "${INSTALL_SKIN_ARCHIVE:-}" ]; then
+  log "Installer: installing skin from $INSTALL_SKIN_ARCHIVE"
+  installed_id="$(install_skin_archive "$INSTALL_SKIN_ARCHIVE")" || installed_id=""
+  if [ -n "$installed_id" ]; then
+    # set active skin in config (add or replace skin= line)
+    sudo sed -i '/^skin=/d' "$CONFIG_FILE" || true
+    sudo sh -c "printf '%s\n' \"skin=$installed_id\" >> \"$CONFIG_FILE\""
+    log "Activated installed skin: $installed_id"
+  else
+    warn "Skin installation failed"
+  fi
+fi
+
 if [ "${WANT_DAEMON:-0}" -eq 1 ] && [ "$BIN_INSTALLED" -eq 0 ]; then
   warn "Core daemon ($BINARY_NAME) was not found in staged artifacts. Continuing anyway."
 fi
 
 # Remove legacy binaries if present
-if [ -f "/usr/local/bin/cpu-throttle" ]; then
-  log "Removing legacy binary /usr/local/bin/cpu-throttle"
-  sudo rm -f /usr/local/bin/cpu-throttle
-fi
-if [ -f "/usr/local/bin/cpu_throttle-ctl" ]; then
-  log "Removing legacy binary /usr/local/bin/cpu_throttle-ctl"
-  sudo rm -f /usr/local/bin/cpu_throttle-ctl
-fi
+cleanup_legacy_files() {
+  log "Checking for legacy files from previous versions..."
+  
+  # Legacy binaries (various naming schemes from v1)
+  local legacy_binaries=(
+    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
+    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
+    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
+    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
+    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
+    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
+  )
+  
+  for binary in "${legacy_binaries[@]}"; do
+    if [ -f "$binary" ]; then
+      log "Removing legacy binary: $binary"
+      sudo rm -f "$binary"
+    fi
+  done
+  
+  # Legacy systemd services
+  local legacy_services=(
+    "cpu-throttle"      # v1 service with dash
+    "cpu_throttle"      # v1 service with underscore
+  )
+  
+  for service in "${legacy_services[@]}"; do
+    # Stop and disable service first, then remove files
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      log "Stopping legacy systemd service: $service"
+      sudo systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+      log "Disabling legacy systemd service: $service"
+      sudo systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+    # Only remove service file after service is stopped and disabled
+    if [ -f "/etc/systemd/system/${service}.service" ]; then
+      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
+      sudo rm -f "/etc/systemd/system/${service}.service"
+    fi
+  done
+  
+  # Reload systemd to pick up changes
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+cleanup_legacy_files
 
 # =========================
 # Port selection and web API enablement

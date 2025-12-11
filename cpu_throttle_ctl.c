@@ -5,20 +5,176 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <pwd.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include <ctype.h>
+
+#include <sys/wait.h>
 
 #define SOCKET_PATH "/tmp/cpu_throttle.sock"
 
+#define MAX_EXCL_TOKENS 128
+#define MAX_EXCL_TOKEN_LEN 128
+// Constants for buffer sizes and limits
+#define CMD_BUFFER_SIZE 512
+#define INITIAL_RESPONSE_CAPACITY 32768
+#define RESPONSE_EXPANSION_THRESHOLD 4096
+#define MAX_PROFILE_NAME_LENGTH 64
+#define TEMP_FILE_TEMPLATE "/tmp/cpu_throttle_ctl_json_XXXXXX"
+#define SKIN_HEADER_BUFFER_SIZE 512
+#define SKIN_DATA_BUFFER_SIZE 4096
+#define SKIN_RESPONSE_BUFFER_SIZE 1024
+#define GENERAL_CMD_BUFFER_SIZE 256
+
+static int verbose = 0;
+
 char* get_profile_dir() {
     return "/var/lib/cpu_throttle/profiles";
+}
+
+// Validate profile name: alphanumeric, underscore, dash, no path separators
+static int validate_profile_name(const char *name) {
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    if (len > MAX_PROFILE_NAME_LENGTH) return 0; // reasonable max length
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!isalnum(c) && c != '_' && c != '-') return 0;
+    }
+    return 1;
+}
+
+static int has_local_cmd(const char *name) {
+    char path[256];
+    snprintf(path, sizeof(path), "/usr/bin/%s", name);
+    return access(path, X_OK) == 0;
+}
+
+// Attempt to pretty-print JSON using common tools (jq, python3 json.tool).
+// If not available or formatting fails, fall back to printing the raw JSON.
+static void print_json_pretty_or_raw(const char *json) {
+    char tmp_template[] = "/tmp/cpu_throttle_ctl_json_XXXXXX";
+    int fd = mkstemp(tmp_template);
+    if (fd < 0) { printf("%s\n", json); return; }
+    // write the JSON to the temp file
+    size_t jlen = strlen(json);
+    ssize_t w = write(fd, json, jlen);
+    close(fd);
+    if (w < 0) { printf("%s\n", json); unlink(tmp_template); return; }
+
+    char cmd[512]; FILE *pf = NULL;
+    if (has_local_cmd("jq")) {
+        snprintf(cmd, sizeof(cmd), "jq -C . %s", tmp_template);
+        pf = popen(cmd, "r");
+    } else if (has_local_cmd("python3")) {
+        snprintf(cmd, sizeof(cmd), "python3 -m json.tool %s", tmp_template);
+        pf = popen(cmd, "r");
+    }
+    if (!pf) {
+        printf("%s\n", json);
+        unlink(tmp_template);
+        return;
+    }
+    // Read and print formatter output
+    char buf[4096]; size_t nread;
+    while ((nread = fread(buf, 1, sizeof(buf), pf)) > 0) {
+        fwrite(buf, 1, nread, stdout);
+    }
+    int rc = pclose(pf);
+    if (rc != 0) {
+        // fallback to raw JSON if formatter failed
+        printf("%s\n", json);
+    }
+    unlink(tmp_template);
+}
+
+// Normalize token: trim whitespace, strip quotes, lower-case
+static void normalize_token_inline(char *t) {
+    // trim leading
+    char *s = t;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (s != t) memmove(t, s, strlen(s) + 1);
+    // trim trailing
+    int len = (int)strlen(t);
+    while (len > 0 && isspace((unsigned char)t[len-1])) t[--len] = '\0';
+    // strip surrounding quotes
+    if (t[0] == '"' && t[len-1] == '"' && len > 1) {
+        memmove(t, t+1, len-2);
+        t[len-2] = '\0';
+        len -= 2;
+    }
+    // lowercase
+    for (int i=0;i<len;i++) t[i] = (char)tolower((unsigned char)t[i]);
+}
+
+// Parse a CSV or space-separated token list into tokens[]; modifies inp_buffer
+static int parse_csv_to_tokens(char *inp_buffer, char tokens[][MAX_EXCL_TOKEN_LEN], int max_tokens) {
+    int count = 0;
+    if (!inp_buffer || !*inp_buffer) return 0;
+    char *p = inp_buffer;
+    // split on comma
+    char *saveptr;
+    char *tok = strtok_r(p, ",", &saveptr);
+    while (tok && count < max_tokens) {
+        snprintf(tokens[count], MAX_EXCL_TOKEN_LEN, "%s", tok);
+        normalize_token_inline(tokens[count]);
+        if (tokens[count][0] != '\0') count++;
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    return count;
+}
+
+static void join_tokens_to_csv(char tokens[][MAX_EXCL_TOKEN_LEN], int count, char *out, int out_len) {
+    out[0] = '\0';
+    for (int i = 0; i < count; i++) {
+        if (i > 0) strncat(out, ",", out_len - strlen(out) - 1);
+        strncat(out, tokens[i], out_len - strlen(out) - 1);
+    }
+}
+
+// remove tokens that either match exactly (exact=1) or contain subst (exact=0) from tokens[]; returns new count
+static int remove_matching_tokens(char tokens[][MAX_EXCL_TOKEN_LEN], int count, const char *match, int exact) {
+    int out = 0;
+    for (int i=0;i<count;i++) {
+        int keep = 1;
+        if (match && match[0]) {
+            if (exact) {
+                if (strcmp(tokens[i], match) == 0) keep = 0;
+            } else {
+                if (strstr(tokens[i], match) != NULL) keep = 0;
+            }
+        }
+        if (keep) {
+            if (out != i) snprintf(tokens[out], MAX_EXCL_TOKEN_LEN, "%s", tokens[i]);
+            out++;
+        }
+    }
+    return out;
+}
+
+static int token_in_list(char tokens[][MAX_EXCL_TOKEN_LEN], int count, const char *match, int exact) {
+    for (int i=0;i<count;i++) {
+        if (exact) {
+            if (strcmp(tokens[i], match) == 0) return 1;
+        } else {
+            if (strstr(tokens[i], match) != NULL) return 1;
+        }
+    }
+    return 0;
 }
 
 void ensure_profile_dir() {
     char *dir = get_profile_dir();
     // Create ~/.config if needed
     char config_dir[512];
+// Send a command and return the response string (malloc'ed, caller frees).
+
     const char *home = getenv("HOME");
     if (!home) {
         struct passwd *pw = getpwuid(getuid());
@@ -35,19 +191,58 @@ void ensure_profile_dir() {
     mkdir(dir, 0755);
 }
 
+// send_all: ensure all bytes are written to a socket, handle EINTR and EAGAIN.
+static int send_all(int sock_fd, const void *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t r = send(sock_fd, (const char*)buf + sent, len - sent, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1; // caller will perror
+        }
+        sent += (size_t)r;
+    }
+    return 0;
+}
+
 void print_help(const char *name) {
     printf("Usage: %s <command> [args]\n", name);
     printf("\nCommands:\n");
     printf("  set-safe-max <freq>    Set maximum frequency in kHz\n");
     printf("  set-safe-min <freq>    Set minimum frequency in kHz\n");
     printf("  set-temp-max <temp>    Set maximum temperature in °C\n");
+    printf("  set-thermal-zone <num> Set thermal zone (-1=auto, 0-100)\n");
+    printf("  set-use-avg-temp <0|1> Use average CPU temperature (0=no, 1=yes)\n");
+    printf("  set-excluded-types <csv>  Comma-separated thermal type names to exclude (e.g. INT3400,INT3402)\n");
+    printf("    --merge <csv>         Merge the supplied csv into existing excluded types (no overwrite)\n");
+    printf("    --remove <csv>        Remove tokens from existing excluded types (substring matching)\n");
+    printf("  get-excluded-types        Print the current excluded types CSV (accepts --json/-j and --pretty/-p)\n");
+    printf("  toggle-excluded <token>   Toggle presence of <token> in excluded types (substring match by default).\n");
+    printf("                            Use --exact to only match exact tokens.\n");
     printf("  status                 Show current status\n");
     printf("  quit                   Shutdown cpu_throttle daemon\n");
     printf("\nProfile commands:\n");
     printf("  save-profile <name>    Save current settings to a profile\n");
     printf("  load-profile <name>    Load settings from a profile\n");
-    printf("  list-profiles          List all saved profiles\n");
+    printf("  list-profiles          List all saved profiles (accepts --json/-j)\n");
     printf("  delete-profile <name>  Delete a profile\n");
+    printf("  get-profile <name>     Print profile contents\n");
+    printf("  put-profile <name> <file>  Upload profile contents from a file\n");
+    printf("  version                Print daemon version\n");
+    printf("  limits                 Print CPU min/max limits (accepts --json/-j)\n");
+    printf("  zones                  Print thermal zones (accepts --json/-j)\n");
+    printf("  restart                Restart the daemon (if running)\n");
+    printf("  start                  Start the daemon (systemctl or background)\n");
+    printf("\nSkin commands:\n");
+        printf("  skins list             List installed system-wide skins\n");
+        printf("  skins install <archive> Install a local skin archive (tar.gz, tar, zip) by uploading it to the daemon\n");
+        printf("    --activate, -a       Activate the skin after install (attempts to parse installed id from response)\n");
+        printf("  skins activate <id>    Activate a skin by id\n");
+        printf("  skins deactivate <id>  Deactivate the specified skin\n");
+        printf("  skins remove <id>      Remove a skin (delete files; admin-only)\n");
+        printf("  skins default          Reset UI to the built-in default (clear active skin)\n");
+        printf("    --json, -j           Request JSON output (daemon will return JSON)\n");
+        printf("    --pretty, -p         Request JSON output and attempt to format it (if tool available)\n");
     printf("\nExamples:\n");
     printf("  %s set-safe-max 3000000\n", name);
     printf("  %s save-profile gaming\n", name);
@@ -57,16 +252,20 @@ void print_help(const char *name) {
 }
 
 int send_command(const char *cmd) {
+    if (verbose) fprintf(stderr, "DEBUG: Connecting to socket %s\n", SOCKET_PATH);
+    // Ensure SIGPIPE doesn't crash the CLI if the daemon closes the socket
+    signal(SIGPIPE, SIG_IGN);
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("socket");
         return -1;
     }
+    if (verbose) fprintf(stderr, "DEBUG: Socket created, fd=%d\n", sock_fd);
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
 
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Error: Cannot connect to cpu_throttle daemon.\n");
@@ -74,33 +273,86 @@ int send_command(const char *cmd) {
         close(sock_fd);
         return -1;
     }
+    if (verbose) fprintf(stderr, "DEBUG: Connected to daemon\n");
 
-    printf("Connected to socket\n");
 
-    if (send(sock_fd, cmd, strlen(cmd), 0) < 0) {
-        perror("send");
-        close(sock_fd);
-        return -1;
-    }
+    char cmd_nl[CMD_BUFFER_SIZE]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (verbose) fprintf(stderr, "DEBUG: Sending command: %s", cmd_nl);
+    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) { perror("send"); close(sock_fd); return -1; }
 
-    printf("Sent command: %s\n", cmd);
 
     char response[512];
-    printf("Waiting for response...\n");
     ssize_t n = recv(sock_fd, response, sizeof(response) - 1, 0);
-    printf("recv returned %zd\n", n);
     if (n > 0) {
         response[n] = '\0';
-        printf("Received: '%s'\n", response);
         printf("%s", response);
+        if (verbose) fprintf(stderr, "DEBUG: Received response (%zd bytes)\n", n);
     } else if (n == 0) {
         printf("Connection closed by server\n");
+        if (verbose) fprintf(stderr, "DEBUG: Connection closed by server\n");
     } else {
         perror("recv");
     }
 
     close(sock_fd);
+    if (verbose) fprintf(stderr, "DEBUG: Socket closed\n");
     return 0;
+}
+
+// Send a command and return the response string (malloc'ed, caller frees).
+char *send_command_get_response(const char *cmd) {
+    if (verbose) fprintf(stderr, "DEBUG: Connecting to socket %s for response\n", SOCKET_PATH);
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        if (verbose) perror("DEBUG: socket failed");
+        return NULL;
+    }
+    if (verbose) fprintf(stderr, "DEBUG: Socket created, fd=%d\n", sock_fd);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (verbose) perror("DEBUG: connect failed");
+        close(sock_fd); return NULL;
+    }
+    if (verbose) fprintf(stderr, "DEBUG: Connected to daemon\n");
+    char cmd_nl[CMD_BUFFER_SIZE]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (verbose) fprintf(stderr, "DEBUG: Sending command: %s", cmd_nl);
+    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) {
+        if (verbose) perror("DEBUG: send failed");
+        close(sock_fd); return NULL;
+    }
+    // Read up to some reasonable max (e.g., 32KB)
+    size_t cap = INITIAL_RESPONSE_CAPACITY; char *buf = malloc(cap);
+    if (!buf) {
+        if (verbose) fprintf(stderr, "DEBUG: malloc failed\n");
+        close(sock_fd); return NULL;
+    }
+    size_t total = 0;
+    while (1) {
+        ssize_t n = recv(sock_fd, buf + total, (ssize_t)cap - 1 - total, 0);
+        if (n > 0) {
+            total += (size_t)n;
+            if (verbose) fprintf(stderr, "DEBUG: Received %zd bytes, total %zu\n", n, total);
+            if (cap - total < RESPONSE_EXPANSION_THRESHOLD) {
+                size_t ncap = cap * 2;
+                if (verbose) fprintf(stderr, "DEBUG: Expanding buffer to %zu\n", ncap);
+                char *nb = realloc(buf, ncap);
+                if (!nb) {
+                    if (verbose) fprintf(stderr, "DEBUG: realloc failed\n");
+                    free(buf); close(sock_fd); return NULL;
+                }
+                buf = nb; cap = ncap;
+            }
+            continue;
+        }
+        break;
+    }
+    ssize_t n = (ssize_t)total;
+    close(sock_fd);
+    if (verbose) fprintf(stderr, "DEBUG: Socket closed, total received %zd bytes\n", n);
+    if (n <= 0) { free(buf); return NULL; }
+    buf[n] = '\0';
+    return buf;
 }
 
 void save_profile(const char *profile_name) {
@@ -116,7 +368,7 @@ void save_profile(const char *profile_name) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
 
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Error: Cannot connect to daemon\n");
@@ -124,7 +376,7 @@ void save_profile(const char *profile_name) {
         return;
     }
 
-    send(sock_fd, "status", 6, 0);
+    if (send_all(sock_fd, "status", 6) != 0) { perror("send"); close(sock_fd); return; }
     char response[512];
     ssize_t n = recv(sock_fd, response, sizeof(response) - 1, 0);
     close(sock_fd);
@@ -169,6 +421,8 @@ void load_profile(const char *profile_name) {
     send_command(cmd);
 }
 
+// Client: streaming upload does not need base64
+
 void list_profiles() {
     char *response = NULL;
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -180,7 +434,7 @@ void list_profiles() {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
 
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Error: Cannot connect to cpu_throttle daemon.\n");
@@ -189,7 +443,7 @@ void list_profiles() {
         return;
     }
 
-    if (send(sock_fd, "list-profiles", 13, 0) < 0) {
+    if (send_all(sock_fd, "list-profiles", 13) < 0) {
         perror("send");
         close(sock_fd);
         return;
@@ -228,7 +482,71 @@ void delete_profile(const char *profile_name) {
     }
 }
 
+void get_profile(const char *profile_name) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) { perror("socket"); return; }
+    struct sockaddr_un addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); return; }
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "get-profile %s", profile_name);
+    send(sock_fd, cmd, strlen(cmd), 0);
+    char response[8192];
+    ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+    close(sock_fd);
+    if (n > 0) { response[n] = '\0'; printf("%s", response); }
+}
+
+void put_profile(const char *profile_name, const char *file_path) {
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) { fprintf(stderr, "Error: Cannot open file %s\n", file_path); return; }
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    const long PROFILE_MAX_BYTES = 10L * 1024L * 1024L; // 10MB
+    if (fsize > PROFILE_MAX_BYTES) { fprintf(stderr, "Error: profile file too large (>%ld bytes)\n", PROFILE_MAX_BYTES); fclose(fp); return; }
+
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) { perror("socket"); fclose(fp); return; }
+    struct sockaddr_un addr;
+    memset(&addr,0,sizeof(addr)); addr.sun_family = AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); fclose(fp); return; }
+
+    // Send header: put-profile <name> <len>\n
+    char header[512];
+    int hlen = snprintf(header, sizeof(header), "put-profile %s %ld\n", profile_name, fsize);
+    if (hlen < 0 || hlen >= (int)sizeof(header)) { fprintf(stderr, "Error: header too large\n"); close(sock_fd); fclose(fp); return; }
+    if (send(sock_fd, header, hlen, 0) != hlen) { perror("send header"); close(sock_fd); fclose(fp); return; }
+
+    // Stream file data in chunks to avoid high memory usage
+    char sendbuf[4096];
+    size_t remaining = (size_t)fsize;
+    while (remaining > 0) {
+        size_t toread = remaining > sizeof(sendbuf) ? sizeof(sendbuf) : remaining;
+        size_t r = fread(sendbuf, 1, toread, fp);
+        if (r <= 0) { fprintf(stderr, "Error: fread failed\n"); close(sock_fd); fclose(fp); return; }
+        size_t off = 0;
+        while (off < r) {
+            ssize_t s = send(sock_fd, sendbuf + off, r - off, 0);
+            if (s <= 0) { perror("send"); close(sock_fd); fclose(fp); return; }
+            off += (size_t)s;
+        }
+        remaining -= r;
+    }
+    fclose(fp);
+
+    // Read response
+    char response[1024];
+    ssize_t n = recv(sock_fd, response, sizeof(response)-1, 0);
+    if (n > 0) { response[n] = '\0'; printf("%s\n", response); }
+    close(sock_fd);
+}
+
 int main(int argc, char *argv[]) {
+    // avoid being killed by SIGPIPE when send() on a closed socket
+    signal(SIGPIPE, SIG_IGN);
     if (argc < 2) {
         print_help(argv[0]);
         return 1;
@@ -239,10 +557,26 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    if (verbose) fprintf(stderr, "DEBUG: argc=%d, argv[1]=%s\n", argc, argv[1]);
+    fflush(stderr);
+
+    // Check for verbose flag
+    if (argc >= 2 && (strcmp(argv[1], "--verbose") == 0 || strcmp(argv[1], "-v") == 0)) {
+        verbose = 1;
+        // Shift arguments
+        argc--;
+        argv++;
+        if (verbose) fprintf(stderr, "DEBUG: verbose enabled, new argc=%d, argv[1]=%s\n", argc, argv[1]);
+    }
+
     // Handle profile commands locally
     if (strcmp(argv[1], "save-profile") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Error: Profile name required\n");
+            return 1;
+        }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
             return 1;
         }
         save_profile(argv[2]);
@@ -252,9 +586,24 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Profile name required\n");
             return 1;
         }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         load_profile(argv[2]);
         return 0;
     } else if (strcmp(argv[1], "list-profiles") == 0) {
+        // Optional --json/-j to return JSON via socket
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            char *resp = send_command_get_response("list-profiles json");
+            if (!resp) { fprintf(stderr, "Error: failed to query profiles\n"); return 1; }
+            if (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) {
+                print_json_pretty_or_raw(resp);
+            } else {
+                printf("%s\n", resp);
+            }
+            free(resp); return 0;
+        }
         list_profiles();
         return 0;
     } else if (strcmp(argv[1], "delete-profile") == 0) {
@@ -262,8 +611,339 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Profile name required\n");
             return 1;
         }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         delete_profile(argv[2]);
         return 0;
+    }
+    else if (strcmp(argv[1], "get-profile") == 0) {
+        if (argc < 3) { fprintf(stderr, "Error: Profile name required\n"); return 1; }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
+        get_profile(argv[2]);
+        return 0;
+    }
+    else if (strcmp(argv[1], "put-profile") == 0) {
+        if (argc < 4) { fprintf(stderr, "Error: Profile name and file required\n"); return 1; }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
+        put_profile(argv[2], argv[3]);
+        return 0;
+    }
+    else if (strcmp(argv[1], "start") == 0) {
+        // Try to start via systemctl first
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("systemctl", "systemctl", "start", "cpu_throttle.service", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                printf("Started cpu_throttle via systemctl\n");
+                return 0;
+            }
+        }
+        // Fallback: attempt to launch in background
+        if (fork() == 0) {
+            // Child
+            execlp("cpu_throttle", "cpu_throttle", "--web-port", NULL);
+            _exit(1);
+        }
+        printf("Started cpu_throttle in background\n");
+        return 0;
+    }
+
+    // Skin commands
+    if (strcmp(argv[1], "skins") == 0) {
+                if (strcmp(argv[2], "install") == 0) {
+                    // usage: cpu_throttle_ctl skins install <archive> [--activate|-a]
+                    int activate_after = 0;
+                    if (argc < 4) {
+                        fprintf(stderr, "Error: archive path required for 'skins install'\n");
+                        return 1;
+                    }
+                    // optional activate flag as argv[4]
+                    const char *archive_path = argv[3];
+                    if (argc >= 5) {
+                        if (strcmp(argv[4], "--activate") == 0 || strcmp(argv[4], "-a") == 0) activate_after = 1;
+                    }
+                    // open file and send via put-skin
+                    FILE *fp = fopen(archive_path, "rb");
+                    if (!fp) { fprintf(stderr, "Error: cannot open file %s\n", argv[3]); return 1; }
+                    fseek(fp, 0, SEEK_END); long fsize = ftell(fp); fseek(fp, 0, SEEK_SET);
+                    if (fsize <= 0) { fprintf(stderr, "Error: empty file\n"); fclose(fp); return 1; }
+                    const long SKIN_MAX_BYTES = 50L * 1024L * 1024L; // 50MB
+                    if (fsize > SKIN_MAX_BYTES) { fprintf(stderr, "Error: archive too large (>%ld bytes)\n", SKIN_MAX_BYTES); fclose(fp); return 1; }
+                    // compose header: put-skin <basename> <len>\n
+                    char *base = strrchr(argv[3], '/'); if (base) base++; else base = argv[3];
+                    char header[512]; int hlen = snprintf(header, sizeof(header), "put-skin %s %ld\n", base, (long)fsize);
+                    if (hlen < 0 || hlen >= (int)sizeof(header)) { fprintf(stderr, "Error: header too large\n"); fclose(fp); return 1; }
+                    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                    if (sock_fd < 0) { perror("socket"); fclose(fp); return 1; }
+                    struct sockaddr_un addr; memset(&addr,0,sizeof(addr)); addr.sun_family=AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
+                    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("connect"); close(sock_fd); fclose(fp); return 1; }
+                    if (send(sock_fd, header, hlen, 0) != hlen) { perror("send header"); close(sock_fd); fclose(fp); return 1; }
+                    char buf[4096]; size_t remaining = (size_t)fsize; while (remaining) {
+                        size_t toread = remaining > sizeof(buf) ? sizeof(buf) : remaining; size_t r = fread(buf,1,toread,fp); if (r <= 0) { fprintf(stderr, "Error: fread failed\n"); close(sock_fd); fclose(fp); return 1; }
+                        size_t off = 0; while (off < r) { ssize_t s = send(sock_fd, buf+off, r-off, 0); if (s <= 0) { perror("send"); close(sock_fd); fclose(fp); return 1; } off += (size_t)s; }
+                        remaining -= r;
+                    }
+                    fclose(fp);
+                    char resp[1024]; ssize_t n = recv(sock_fd, resp, sizeof(resp)-1, 0); if (n > 0) { resp[n]='\0'; printf("%s", resp); }
+                    close(sock_fd);
+                    // If requested, attempt to activate installed skin by parsing returned id
+                    if (activate_after) {
+                        const char *marker = "installed ";
+                        char id[256] = {0};
+                        const char *p = strstr(resp, marker);
+                        if (p) {
+                            p += strlen(marker);
+                            size_t i = 0;
+                            while (*p && *p != '\n' && *p != '\r' && *p != ' ' && i + 1 < sizeof(id)) id[i++] = *p++;
+                            id[i] = '\0';
+                            if (i > 0) {
+                                char cmd[512]; snprintf(cmd, sizeof(cmd), "activate-skin %s", id);
+                                send_command(cmd);
+                            } else {
+                                fprintf(stderr, "Warning: could not parse installed id for activation\n");
+                            }
+                        } else {
+                            fprintf(stderr, "Warning: server did not report installed id, cannot activate\n");
+                        }
+                    }
+                    return 0;
+                }
+        if (argc < 3) {
+            fprintf(stderr, "Error: skins subcommand required (list|activate)");
+            return 1;
+        }
+        if (strcmp(argv[2], "list") == 0) {
+            // Optional 'json' argument to request JSON output
+                    int pretty_flag = 0;
+                    if (argc >= 4 && (strcmp(argv[3], "--pretty") == 0 || strcmp(argv[3], "-p") == 0)) pretty_flag = 1;
+                    if (argc >= 4 && (strcmp(argv[3], "json") == 0 || strcmp(argv[3], "--json") == 0 || strcmp(argv[3], "-j") == 0 || pretty_flag)) {
+                        char *resp = send_command_get_response("list-skins json");
+                if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
+                        if (pretty_flag) print_json_pretty_or_raw(resp); else printf("%s", resp);
+                free(resp);
+                return 0;
+            }
+            return send_command("list-skins");
+        }
+        else if (strcmp(argv[2], "activate") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: skin id required for 'skins activate'\n");
+                return 1;
+            }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "activate-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else if (strcmp(argv[2], "deactivate") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: skin id required for 'skins deactivate'\n");
+                return 1;
+            }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "deactivate-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else if (strcmp(argv[2], "default") == 0) {
+            // Reset to default: find currently active skin via list-skins json, then deactivate it
+            char *resp = send_command_get_response("list-skins json");
+            if (!resp) { fprintf(stderr, "Error: failed to query skins\n"); return 1; }
+            char *p = resp;
+            int done = 0;
+            while (p) {
+                char *idpos = strstr(p, "\"id\":\"");
+                if (!idpos) break;
+                idpos += strlen("\"id\":\"");
+                char *idend = strchr(idpos, '"'); if (!idend) break;
+                size_t idlen = (size_t)(idend - idpos);
+                char idbuf[256] = {0}; if (idlen >= sizeof(idbuf)) idlen = sizeof(idbuf)-1; memcpy(idbuf, idpos, idlen); idbuf[idlen] = '\0';
+                char *activepos = strstr(idpos, "\"active\":true");
+                if (activepos && activepos < strchr(idpos, '}')) {
+                    // deactivate this skin
+                    char cmd[256]; snprintf(cmd, sizeof(cmd), "deactivate-skin %s", idbuf);
+                    send_command(cmd);
+                    done = 1; break;
+                }
+                p = idpos + idlen;
+            }
+            free(resp);
+            if (!done) { fprintf(stderr, "No active skin found or failed to deactivate.\n"); return 1; }
+            return 0;
+        }
+        else if (strcmp(argv[2], "remove") == 0) {
+            if (argc < 4) { fprintf(stderr, "Error: skin id required for 'skins remove'\n"); return 1; }
+            int skip_confirm = 0;
+            if (argc >= 5 && (strcmp(argv[4], "--yes") == 0 || strcmp(argv[4], "-y") == 0)) skip_confirm = 1;
+            if (!skip_confirm) {
+                printf("Confirm remove skin '%s'? [y/N] ", argv[3]); fflush(stdout);
+                char ans[8]; if (!fgets(ans, sizeof(ans), stdin)) return 1;
+                if (!(ans[0] == 'y' || ans[0] == 'Y')) { printf("Aborting.\n"); return 1; }
+            }
+            char cmd[256]; snprintf(cmd, sizeof(cmd), "remove-skin %s", argv[3]);
+            return send_command(cmd);
+        }
+        else {
+            fprintf(stderr, "Error: Unknown skins subcommand '%s'\n", argv[2]);
+            return 1;
+        }
+    }
+
+    // status/limits/zones commands: support optional --json/-j or --pretty/-p
+    if (strcmp(argv[1], "status") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("status json"); if (!resp) { fprintf(stderr, "Error: failed to query status\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s", resp); free(resp); return 0;
+        }
+        return send_command("status");
+    }
+    if (strcmp(argv[1], "limits") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("limits json"); if (!resp) { fprintf(stderr, "Error: failed to query limits\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("limits");
+    }
+    if (strcmp(argv[1], "zones") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("zones");
+    }
+
+    // get-excluded-types: support optional --json/-j or --pretty/-p
+    if (strcmp(argv[1], "get-excluded-types") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("get-excluded-types json"); if (!resp) { fprintf(stderr, "Error: failed to query excluded types\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("get-excluded-types");
+    }
+
+    // toggle-excluded: toggle a token in the excluded-types list (non-destructive merge)
+    if (strcmp(argv[1], "toggle-excluded") == 0) {
+        int exact = 0; int argi = 2;
+        if (argc >= 3 && (strcmp(argv[2], "--exact") == 0)) { exact = 1; argi = 3; }
+        if (argc <= argi) { fprintf(stderr, "Error: token required for toggle-excluded\n"); return 1; }
+        char token_raw[MAX_EXCL_TOKEN_LEN]; snprintf(token_raw, sizeof(token_raw), "%s", argv[argi]); normalize_token_inline(token_raw);
+        if (token_raw[0] == '\0') { fprintf(stderr, "Error: invalid token\n"); return 1; }
+        // query current csv
+        char *cur = send_command_get_response("get-excluded-types"); if (!cur) {
+            // Empty response is considered an empty CSV; proceed with empty string
+            cur = strdup("");
+        }
+        // cur may contain newline(s) — trim
+        char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+        char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+        free(cur);
+        // check if already present
+        int present = token_in_list(tokens, count, token_raw, exact);
+        if (present) {
+            // remove matching tokens
+            count = remove_matching_tokens(tokens, count, token_raw, exact);
+        } else {
+            // add token
+            if (count + 1 < MAX_EXCL_TOKENS) {
+                snprintf(tokens[count], MAX_EXCL_TOKEN_LEN, "%s", token_raw);
+                tokens[count][MAX_EXCL_TOKEN_LEN-1] = '\0';
+                count++;
+            } else {
+                fprintf(stderr, "Error: too many excluded tokens (limit %d)\n", MAX_EXCL_TOKENS); return 1;
+            }
+        }
+        // build csv
+        char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+        char cmdb[4096];
+        if (count == 0) {
+            snprintf(cmdb, sizeof(cmdb), "set-excluded-types none");
+        } else {
+            // Construct string with explicit max length to avoid overflow/truncation warnings
+            size_t prefix_len = strlen("set-excluded-types ");
+            size_t max_new_len = sizeof(cmdb) - prefix_len - 1;
+            snprintf(cmdb, sizeof(cmdb), "set-excluded-types %.*s", (int)max_new_len, newcsv);
+        }
+        char *resp2 = send_command_get_response(cmdb);
+        if (!resp2) {
+            // if the daemon returned no response (e.g., empty), fall back to printing via send_command
+            fprintf(stderr, "Warning: server returned no response; attempting to print via send_command\n");
+            send_command(cmdb);
+        } else {
+            printf("%s\n", resp2);
+            free(resp2);
+        }
+        return 0;
+    }
+
+    // Add two new features to set-excluded-types: --merge (add) and --remove (remove tokens)
+    if (strcmp(argv[1], "set-excluded-types") == 0) {
+        if (argc >= 3 && strcmp(argv[2], "--merge") == 0) {
+            if (argc < 4) { fprintf(stderr, "Error: missing CSV argument for --merge\n"); return 1; }
+            // get existing CSV
+            char *cur = send_command_get_response("get-excluded-types"); if (!cur) { cur = strdup(""); }
+            char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+            char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+            free(cur);
+            // parse new csv (first non-flag argument)
+            const char *csv_arg = NULL;
+            for (int j = 3; j < argc; j++) { if (argv[j][0] != '-') { csv_arg = argv[j]; break; } }
+            if (!csv_arg) { fprintf(stderr, "Error: missing CSV argument for --merge\n"); return 1; }
+            char argbuf[1024]; snprintf(argbuf, sizeof(argbuf), "%s", csv_arg);
+            char newtokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int ncount = parse_csv_to_tokens(argbuf, newtokens, MAX_EXCL_TOKENS);
+            // add tokens not present
+            for (int i=0;i<ncount;i++) {
+                if (!token_in_list(tokens, count, newtokens[i], 1)) {
+                    if (count + 1 < MAX_EXCL_TOKENS) {
+                        snprintf(tokens[count], MAX_EXCL_TOKEN_LEN, "%s", newtokens[i]); count++;
+                    }
+                }
+            }
+            char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+            char cmdb[4096]; if (count == 0) snprintf(cmdb, sizeof(cmdb), "set-excluded-types none"); else { size_t prefix_len = strlen("set-excluded-types "); size_t max_new_len = sizeof(cmdb) - prefix_len - 1; snprintf(cmdb, sizeof(cmdb), "set-excluded-types %.*s", (int)max_new_len, newcsv); }
+            char *resp = send_command_get_response(cmdb); if (!resp) { fprintf(stderr, "Error: failed to set-excluded-types\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
+        if (argc >= 3 && strcmp(argv[2], "--remove") == 0) {
+            int exact_remove = 0; const char *csv_arg = NULL;
+            for (int j = 3; j < argc; j++) {
+                if (strcmp(argv[j], "--exact") == 0) { exact_remove = 1; continue; }
+                if (argv[j][0] == '-') continue;
+                csv_arg = argv[j]; break;
+            }
+            if (!csv_arg) { fprintf(stderr, "Error: missing CSV argument for --remove\n"); return 1; }
+            char *cur = send_command_get_response("get-excluded-types"); if (!cur) { cur = strdup(""); }
+            char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+            char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+            free(cur);
+            char argbuf[1024]; snprintf(argbuf, sizeof(argbuf), "%s", csv_arg);
+            char removetokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int rcount = parse_csv_to_tokens(argbuf, removetokens, MAX_EXCL_TOKENS);
+            if (verbose) {
+                fprintf(stderr, "DEBUG: existing tokens (%d):\n", count);
+                for (int i=0;i<count;i++) fprintf(stderr, "  - '%s'\n", tokens[i]);
+                fprintf(stderr, "DEBUG: removetokens (%d):\n", rcount);
+                for (int i=0;i<rcount;i++) fprintf(stderr, "  - '%s'\n", removetokens[i]);
+                fprintf(stderr, "DEBUG: exact_remove=%d\n", exact_remove);
+                fprintf(stderr, "DEBUG: csv_arg=%s\n", csv_arg);
+            }
+            for (int i=0;i<rcount;i++) {
+                if (verbose) fprintf(stderr, "DEBUG: removing '%s' (exact=%d)\n", removetokens[i], exact_remove);
+                count = remove_matching_tokens(tokens, count, removetokens[i], exact_remove ? 1 : 0);
+            }
+            if (verbose) {
+                fprintf(stderr, "DEBUG: tokens after removal (%d):\n", count);
+                for (int i=0;i<count;i++) fprintf(stderr, "  - '%s'\n", tokens[i]);
+            }
+            char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+            char cmdb[4096]; if (count == 0) snprintf(cmdb, sizeof(cmdb), "set-excluded-types none"); else { size_t prefix_len = strlen("set-excluded-types "); size_t max_new_len = sizeof(cmdb) - prefix_len - 1; snprintf(cmdb, sizeof(cmdb), "set-excluded-types %.*s", (int)max_new_len, newcsv); }
+            char *resp = send_command_get_response(cmdb); if (!resp) { fprintf(stderr, "Error: failed to set-excluded-types\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
     }
 
     // Build command string for daemon

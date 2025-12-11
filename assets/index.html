@@ -2,55 +2,34 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CPU Throttle Monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- New: modern mobile web app capability meta (recommended) -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Burn2Cool Dashboard</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <link rel="stylesheet" href="styles.css">
-  <style>
-    *, *:before, *:after { box-sizing: border-box; }
-    body{font-family:sans-serif;max-width:800px;margin:20px auto;padding:20px;background:#1a1a1a;color:#fff}
-    h1{color:#FF8C00}h2{border-bottom:2px solid #FF8C00;padding-bottom:10px}
-    .card{background:#2a2a2a;padding:20px;margin:10px 0;border-radius:8px}
-    .value{font-size:2em;font-weight:bold;color:#FF8C00}
-    .label{color:#999;font-size:0.9em}
-    button{background:#FF8C00;color:#fff;border:none;padding:8px 12px;margin:5px;border-radius:4px;cursor:pointer;width:140px;text-align:center;display:inline-block}
-    button:hover{background:#e67e22}
-    input{padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;max-width:100%}
-    textarea{width:100%;max-width:100%;box-sizing:border-box;padding:8px;margin:5px;border:1px solid #555;background:#333;color:#fff;border-radius:4px;resize:vertical}
-    .topbar{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;font-size:0.9em;background:rgba(0,0,0,0.15);border-radius:6px;margin-bottom:12px}
-    .topbar a{color:#fff;text-decoration:none;font-weight:600}
-    .topbar .version{color:#ddd;font-size:0.85em}
-    @media (max-width:700px) {
-      body{padding:12px;margin:8px}
-      .card{padding:12px}
-      .topbar{font-size:0.85em;flex-direction:column;align-items:flex-start;gap:6px}
-      .topbar .version{align-self:flex-end}
-      input, textarea, button { width:100%; box-sizing:border-box; margin:6px 0; }
-      .value{font-size:1.6em}
-    }
-  </style>
   </head>
   <body>
-    <div class='topbar'><a href='https://github.com/DiabloPower/burn2cool' target='_blank' rel='noopener'>GitHub</a><div class='version'>v3.0</div></div>
-    <h1>CPU Throttle Monitor</h1>
-    <div class='card'>
+    <div class='topbar'><a href='https://github.com/DiabloPower/burn2cool' target='_blank' rel='noopener'>GitHub</a><div class='version'>v?</div></div>
+    <h1>Burn2Cool Dashboard</h1>
+    <div class='cards-grid'>
+    <div class='card status-card'>
       <h2>Current Status</h2>
-      <div class='label'>Temperature</div>
-      <div class='value' id='temp'>--</div>
-      <div class='label'>Frequency</div>
-      <div class='value' id='freq'>--</div>
+      <div class='card-body'>
+      <div class='status-grid'>
+        <div class='status-row'><div class='label'>Temperature</div><div class='value' id='temp'>--</div></div>
+        <div class='status-row'><div class='label'>Frequency</div><div class='value' id='freq'>--</div></div>
+        <div class='status-row'><div class='label'>Thermal Zone</div><div class='value' id='zone'>--</div></div>
+        <div class='status-row'><div class='label'>Use Avg Temp</div><div class='value' id='avg'>--</div></div>
+        <div class='status-row'><div class='label'>Daemon user</div><div class='value' id='daemon_user'>--</div></div>
+      </div>
+      </div>
     </div>
-    <div class='card'>
-      <h2>Settings</h2>
-      <div><input id='safe_max' type='number' placeholder='Safe Max (kHz)'>
-      <button onclick='setSetting("safe-max",document.getElementById("safe_max").value)'>Set Max</button></div>
-      <div><input id='safe_min' type='number' placeholder='Safe Min (kHz)'>
-      <button onclick='setSetting("safe-min",document.getElementById("safe_min").value)'>Set Min</button></div>
-      <div><input id='temp_max' type='number' placeholder='Temp Max (C)'>
-      <button onclick='setSetting("temp-max",document.getElementById("temp_max").value)'>Set Temp</button></div>
-    </div>
-    <div class='card'>
+    <div class='card profiles-card'>
       <h2>Profiles</h2>
+      <div class='card-body'>
       <div class='label profiles-row'>
         <label for='profilesSelect'>Choose profile:</label>
         <select id='profilesSelect' class='profiles-select'>
@@ -60,14 +39,122 @@
       <hr/>
       <input id='pname' placeholder='profile filename' />
       <textarea id='pcontent' rows='6' placeholder='profile content (key=value lines)'></textarea>
-      <div>
+      <div class='profiles-actions'>
         <button id='createBtn'>Create</button>
         <button id='saveBtn'>Save</button>
         <button id='deleteBtn'>Delete</button>
         <button id='loadBtn'>Load to daemon</button>
       </div>
-    <div id='toast' style='position:fixed; top:20px; right:20px; padding:12px 16px; border-radius:6px; background:#333; border:1px solid #555; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:1000; display:none; font-weight:bold;'></div>
-    <script>
+      </div>
+      </div>
+    <div class='card'>
+      <h2>Settings</h2>
+      <div class='card-body'>
+      <div class='settings-grid'>
+        <div class='setting-row'><input id='safe_max' type='number' placeholder='Safe Max (kHz)'>
+        <button onclick='setSetting("safe-max",document.getElementById("safe_max").value)'>Set Max</button></div>
+        <div class='setting-row'><input id='safe_min' type='number' placeholder='Safe Min (kHz)'>
+        <button onclick='setSetting("safe-min",document.getElementById("safe_min").value)'>Set Min</button></div>
+        <div class='setting-row'><input id='temp_max' type='number' placeholder='Temp Max (C)'>
+        <button onclick='setSetting("temp-max",document.getElementById("temp_max").value)'>Set Temp</button></div>
+      </div>
+      <hr/>
+      <div class='settings-grid'>
+        <div class='setting-row excluded'><input id='excludedTypes' type='text' placeholder='Excluded Types (e.g. INT3400,INT3402)'>
+        <button onclick='setSettingText("excluded-types",document.getElementById("excludedTypes").value)'>Set Excluded Types</button></div>
+        
+        <div class='setting-row'><label for='thermalZoneSelect'>Thermal Zone</label>
+        <select id='thermalZoneSelect' onchange='setSetting("thermal-zone", this.value)'></select></div>
+        <div class='setting-row avg-row'><button id='avgBtn' onclick='toggleAvgTemp()'>Use Avg Temp</button></div>
+      </div>
+      <hr/>
+      <div class='settings-grid restart-grid'>
+        <div class='setting-row restart'><button id='restartBtn' class='btn-danger'>Restart daemon</button></div>
+      </div>
+
+      </div>
+      </div>
+      </div>
+    <div id='toast'></div>
+    <!-- Floating button to open skins modal (non-intrusive floating action button) -->
+    <div id='confirmModal' class='modal hidden'>
+      <div class='modal-overlay'></div>
+      <div class='modal-content'>
+        <div class='modal-message' id='confirmMessage'>Confirm?</div>
+        <div class='modal-actions'>
+          <button id='confirmOk' class='btn-danger'>Confirm</button>
+          <button id='confirmCancel'>Cancel</button>
+        </div>
+      </div>
+    </div>
+    <!-- Skins management modal: lists available skins, preview, and allows activation -->
+    <div id='skinsModal' class='modal hidden'>
+      <div class='modal-overlay' id='skinsOverlay'></div>
+      <div class='modal-content'>
+        <div class='modal-header'>
+          <div class='modal-row-title'>
+            <h3 class='modal-title'>Skins</h3>
+          </div>
+          <div class='modal-row-actions'>
+            <div class='header-left'>
+              <button id='skinsResetBtn' class='btn-secondary btn-icon' title='Revert to default' aria-label='Revert to default'>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                </svg>
+                <span>Default</span>
+              </button>
+              
+              <input type='file' id='skinFileInput' accept='.zip,.tgz,.tar,.gz,.tar.gz,.zip' class='hidden-file-input' aria-label='Choose skin archive file' />
+              <div class='install-group'>
+                <button id='skinsInstallBtn' class='btn-secondary' title='Install skin'>Install</button>
+                <progress id='skinUploadProgress' class='upload-progress' value='0' max='100'></progress>
+                <label class='install-activate'>
+                  <input type='checkbox' id='skinActivateAfterInstall' title='Activate after install' />
+                  <span>Activate after install</span>
+                </label>
+              </div>
+            </div>
+            <div class='header-right'>
+            </div>
+            <button id='skinsClose' class='btn-close' aria-label='Close skins modal'>×</button>
+          </div>
+        </div>
+        <div id='skinsContainer' class='skins-list'>
+          <!-- Items populated dynamically: .skin-card -->
+        </div>
+      </div>
+      </div>
+      <!-- Floating button to open skins modal (moved to end-of-body so on mobile it's rendered below content) -->
+      <button id="skinFab" class="fab" title="Manage skins">Skins</button>
+      <script>
+      // Provide a global window.showConfirm fallback so code can call it before DOMContentLoaded
+      if (typeof window.showConfirm !== 'function') {
+        window.showConfirm = function(msg){ return new Promise((resolve)=>{ resolve(window.confirm(msg)); }); };
+      }
+      // Global confirm modal helper (declarations only, returned as a Promise)
+      function showConfirmModal(message){
+        return new Promise((resolve)=>{
+          const modal = document.getElementById('confirmModal');
+          const messageEl = document.getElementById('confirmMessage');
+          if(!modal || !messageEl){
+            // fallback to native confirm if DOM not ready or modal missing
+            resolve(window.confirm(message));
+            return;
+          }
+          messageEl.textContent = message;
+          modal.classList.remove('hidden');
+          const ok = document.getElementById('confirmOk');
+          const cancel = document.getElementById('confirmCancel');
+          function cleanup(){ modal.classList.add('hidden'); ok.removeEventListener('click', onOk); cancel.removeEventListener('click', onCancel); }
+          function onOk(){ cleanup(); resolve(true); }
+          function onCancel(){ cleanup(); resolve(false); }
+          ok.addEventListener('click', onOk);
+          cancel.addEventListener('click', onCancel);
+          const onKey = (e)=>{ if(e.key === 'Escape'){ cleanup(); resolve(false); } };
+          document.addEventListener('keydown', onKey, {once:true});
+        });
+      }
+      var useAvgTemp = false;
       function showToast(message, type = 'success'){
         console.log('Showing toast:', message, type);
         const toast = document.getElementById('toast');
@@ -83,20 +170,94 @@
         toast.style.display = 'block';
         setTimeout(() => { toast.style.display = 'none'; }, 3000);
       }
+      function toggleAvgTemp() {
+        console.log("toggleAvgTemp called");
+        useAvgTemp = !useAvgTemp;
+        const avgBtn = document.getElementById('avgBtn');
+        avgBtn.textContent = useAvgTemp ? 'Disable Avg Temp' : 'Enable Avg Temp';
+        if(useAvgTemp) avgBtn.classList.add('btn-enabled'); else avgBtn.classList.remove('btn-enabled');
+        setSetting("use-avg-temp", useAvgTemp ? 1 : 0);
+      }
       function update(){
         fetch('/api/status').then(r=>r.json()).then(d=>{
           document.getElementById('temp').textContent=d.temperature+'°C';
           document.getElementById('freq').textContent=(d.frequency/1000).toFixed(0)+' MHz';
+          document.getElementById('zone').textContent=d.thermal_zone;
+          document.getElementById('avg').textContent=d.use_avg_temp;
+          // Set form values - do not override a select the user is currently interacting with
+          const tz = document.getElementById('thermalZoneSelect');
+          if(tz && document.activeElement !== tz) tz.value = d.thermal_zone;
+          useAvgTemp = d.use_avg_temp;
+          const du = document.getElementById('daemon_user'); if (du) du.textContent = d.running_user || '--';
+          // Update avg button label to reflect current state
+          const avgBtn = document.getElementById('avgBtn'); if(avgBtn) { avgBtn.textContent = useAvgTemp ? 'Disable Avg Temp' : 'Enable Avg Temp'; if(useAvgTemp) avgBtn.classList.add('btn-enabled'); else avgBtn.classList.remove('btn-enabled'); }
         }).catch(()=>{});
         refreshProfiles();
+        loadSettings();
       }
-      function setSetting(name,val){
-        fetch('/api/settings/'+name,{method:'POST',body:JSON.stringify({value:parseInt(val)}),headers:{'Content-Type':'application/json'}}).then(()=>update());
+      function loadSettings(){
+        fetch('/api/settings/excluded-types').then(r=>r.json()).then(j=>{
+          if (j && j.excluded_types !== undefined) {
+            const el = document.getElementById('excludedTypes'); if(el && document.activeElement !== el) el.value = j.excluded_types;
+          }
+        }).catch(()=>{});
+      }
+            function setSetting(name,val){
+              console.log("Setting " + name + " to " + val);
+              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: parseInt(val)})}).then(response => response.json()).then(j => {
+                console.log("Response: ", j);
+                if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
+                else if (j && j.status === 'ok') showToast('Updated', 'success');
+                else showToast('Update not saved', 'error');
+                update();
+              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
+            }
+            function setSettingText(name,val){
+              val = val ? val.trim() : val;
+              console.log("Setting string " + name + " to " + val);
+              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: val})}).then(response => response.json()).then(j => {
+                console.log("Response: ", j);
+                if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
+                else if (j && j.status === 'ok') showToast('Updated', 'success');
+                else showToast('Update not saved', 'error');
+                update();
+              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
+            }
+      function fetchDaemonVersion(){
+        fetch('/api/daemon/version').then(r=>r.json()).then(j=>{ const v = j && j.version ? j.version : null; const el = document.querySelector('.topbar .version'); if(el && v) el.textContent = 'v'+v; }).catch(()=>{});
+      }
+      var _lastZoneRefresh = 0;
+      function loadZonesForSelect(){
+        fetch('/api/zones').then(r=>r.json()).then(data=>{
+          const zones = (data.zones || []).slice();
+          // Ensure numeric sort by zone number
+          zones.sort((a,b)=> (parseInt(a.zone) || 0) - (parseInt(b.zone) || 0));
+          const select = document.getElementById('thermalZoneSelect');
+          select.innerHTML = '<option value="-1">Auto</option>';
+          zones.forEach(z=>{
+            const opt = document.createElement('option');
+            opt.value = z.zone;
+            const excluded = !!z.excluded;
+            const temp_text = (z.temp === null || z.temp === undefined) ? '(no reading)' : `${z.temp}°C`;
+            opt.textContent = `Zone ${z.zone}: ${z.type} - ${temp_text}` + (excluded ? ' (excluded)' : '');
+            if (excluded) { opt.disabled = true; opt.style.color = '#999'; }
+            select.appendChild(opt);
+          });
+          _lastZoneRefresh = Date.now();
+        }).catch(()=>{});
+      }
+
+      // Debounced refresh helper for select open events
+      function refreshZonesDebounced(){
+        const now = Date.now();
+        if (now - _lastZoneRefresh > 2000) loadZonesForSelect();
       }
       function refreshProfiles(){
         fetch('/api/profiles').then(r=>r.json()).then(data=>{
           const list = data.profiles || [];
           const select = document.getElementById('profilesSelect');
+          // If the user actively has the select focused, skip modifying it to avoid resetting while interacting
+          if(document.activeElement === select) return;
           const prev = select.value; // remember user's current selection
           select.innerHTML = '';
           if(!list || !Array.isArray(list) || list.length===0){
@@ -134,9 +295,10 @@
         if(!name){ alert('Enter filename'); return; }
         fetch('/api/profiles/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}).then(r=>{ if(r.ok){ showToast('Profile saved', 'success'); refreshProfiles(); } else showToast('Save failed', 'error'); });
       }
-      function deleteProfile(){
+      async function deleteProfile(){
         const name = document.getElementById('pname').value.trim(); if(!name){ alert('Enter filename'); return; }
-        if(!confirm('Delete '+name+'?')) return;
+        const ok = await window.showConfirm('Delete ' + name + '?');
+        if(!ok) return;
         fetch('/api/profiles/'+encodeURIComponent(name), {method:'DELETE'}).then(r=>{ if(r.ok){ showToast('Profile deleted', 'success'); document.getElementById('pname').value=''; document.getElementById('pcontent').value=''; refreshProfiles(); } else showToast('Delete failed', 'error'); });
       }
       function loadProfile(){
@@ -148,7 +310,179 @@
         document.getElementById('saveBtn').addEventListener('click', saveProfile);
         document.getElementById('deleteBtn').addEventListener('click', deleteProfile);
         document.getElementById('loadBtn').addEventListener('click', loadProfile);
+        loadZonesForSelect();
+        // Refresh zones when the user opens the select (keyboard/mouse/touch) with a small debounce
+        const tzSelect = document.getElementById('thermalZoneSelect');
+        if (tzSelect) {
+          tzSelect.addEventListener('focus', refreshZonesDebounced);
+          tzSelect.addEventListener('mousedown', refreshZonesDebounced);
+          tzSelect.addEventListener('touchstart', refreshZonesDebounced, {passive:true});
+        }
+        // set CSS viewport variable for mobile dynamic viewport height (dvh) support
+        (function setDvh(){
+          const update = ()=>{
+            const h = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight;
+            document.documentElement.style.setProperty('--dvh', (h * 0.01) + 'px');
+          };
+          // Throttle updates to avoid layout thrashing
+          let t = 0;
+          const throttled = ()=>{ if(t) return; t = requestAnimationFrame(()=>{ update(); t = 0; }); };
+          update();
+          window.addEventListener('resize', throttled, {passive:true});
+          window.addEventListener('orientationchange', throttled, {passive:true});
+          window.addEventListener('touchstart', throttled, {passive:true});
+          window.addEventListener('touchmove', throttled, {passive:true});
+          window.addEventListener('touchend', throttled, {passive:true});
+          window.addEventListener('focus', throttled, {passive:true});
+          window.addEventListener('blur', throttled, {passive:true});
+          window.addEventListener('pageshow', throttled, {passive:true});
+          document.addEventListener('visibilitychange', throttled, {passive:true});
+          if(window.visualViewport){
+            try{ window.visualViewport.addEventListener('resize', throttled); window.visualViewport.addEventListener('scroll', throttled); }catch(e){}
+          }
+        })();
+        fetchDaemonVersion();
+        // Modal confirm helper (use a Promise so code can await it) — global definition already exists
+        // Ensure global showConfirm uses the modal (override fallback)
+        window.showConfirm = showConfirmModal;
+        // Buttons for daemon control
+        const restartBtn = document.getElementById('restartBtn');
+        if (restartBtn) restartBtn.addEventListener('click', async ()=>{
+          const ok = await window.showConfirm('Restart daemon?');
+          if(!ok) return;
+          fetch('/api/daemon/restart',{method:'POST'}).then(r=>{ if(r.ok) showToast('Daemon restarting', 'success'); else showToast('Failed to restart', 'error'); }).catch(()=>showToast('Failed to restart', 'error'));
+        });
+        // No shutdown button in web UI — leaving shutdown operations out for safety
         setInterval(update,1000); update();
+        // Skins UI: open/close, fetch list and handle activate/preview
+        const skinFab = document.getElementById('skinFab');
+        const skinsModal = document.getElementById('skinsModal');
+        const skinsOverlay = document.getElementById('skinsOverlay');
+        const skinsClose = document.getElementById('skinsClose');
+        if (skinFab) skinFab.addEventListener('click', () => openSkinsModal());
+        if (skinsClose) skinsClose.addEventListener('click', () => closeSkinsModal());
+        if (skinsOverlay) skinsOverlay.addEventListener('click', () => closeSkinsModal());
+        const skinsResetBtn = document.getElementById('skinsResetBtn');
+        if (skinsResetBtn) skinsResetBtn.addEventListener('click', async ()=>{ if (await window.showConfirm('Revert to default assets?')) resetToDefault(); });
+        const skinsInstallBtn = document.getElementById('skinsInstallBtn');
+        const skinFileInput = document.getElementById('skinFileInput');
+        const skinActivateAfterInstall = document.getElementById('skinActivateAfterInstall');
+        if (skinsInstallBtn && skinFileInput) {
+          skinsInstallBtn.addEventListener('click', ()=>{ skinFileInput.click(); });
+          skinFileInput.addEventListener('change', async (e)=>{
+            const f = e.target.files && e.target.files[0]; if(!f) return; const activate = skinActivateAfterInstall && skinActivateAfterInstall.checked;
+            await installSkin(f, activate);
+            // clear the input value so change events fire again for same file
+            skinFileInput.value = '';
+          });
+        }
+
+        function openSkinsModal(){
+          refreshSkinsList();
+          skinsModal.classList.remove('hidden');
+        }
+        function closeSkinsModal(){
+          skinsModal.classList.add('hidden');
+        }
+        function refreshSkinsList(){
+          fetch('/api/skins').then(r=>r.json()).then(data=>{
+            const container = document.getElementById('skinsContainer');
+            container.innerHTML = '';
+            const list = (data && data.skins) ? data.skins : [];
+            if(list.length === 0){ container.innerHTML = '<div style="padding:12px;color:#bbb">No skins installed</div>'; return; }
+            list.forEach(s => {
+              const card = document.createElement('div'); card.className = 'skin-card';
+              card.style.width = '220px'; card.style.background='#111'; card.style.border='1px solid #333'; card.style.borderRadius='8px'; card.style.padding='8px'; card.style.boxSizing='border-box';
+              const title = document.createElement('div'); title.textContent = s.name || s.id; title.style.fontWeight='600'; title.style.marginBottom='6px'; title.style.color='#fff';
+              const preview = document.createElement('img'); preview.src = '/skins/'+encodeURIComponent(s.id)+'/preview.png'; preview.alt = s.name || s.id; preview.style.width='100%'; preview.style.maxHeight='120px'; preview.style.objectFit='cover'; preview.style.borderRadius='4px'; preview.style.background='#222';
+              const meta = document.createElement('div'); meta.style.marginTop='8px'; meta.style.display='flex'; meta.style.gap='6px'; meta.style.justifyContent='space-between';
+              const allowJS = document.createElement('span'); allowJS.textContent = s.allow_extra_js ? 'Extra JS allowed' : ''; allowJS.style.color = s.allow_extra_js ? '#28a745' : '#999'; allowJS.style.fontSize='0.85em';
+              const actions = document.createElement('div'); actions.className = 'skin-actions';
+              const toggleBtn = document.createElement('button');
+              toggleBtn.textContent = s.active ? 'Deactivate' : 'Activate';
+              toggleBtn.className = 'skin-action-btn';
+              if (s.active) toggleBtn.classList.add('active');
+              if (s.active) { toggleBtn.addEventListener('click', ()=>{ deactivateSkin(s.id); }); card.style.borderColor = '#28a745'; }
+              else { toggleBtn.addEventListener('click', ()=>{ activateSkin(s.id); }); }
+              actions.appendChild(toggleBtn);
+              // Add remove button
+              const removeBtn = document.createElement('button');
+              removeBtn.textContent = 'Remove';
+              removeBtn.className = 'btn-danger skin-action-btn';
+              removeBtn.addEventListener('click', async ()=>{ if(await window.showConfirm('Remove skin '+s.id+'?')) removeSkin(s.id); });
+              actions.appendChild(removeBtn);
+              card.appendChild(title); card.appendChild(preview); meta.appendChild(allowJS); meta.appendChild(actions); card.appendChild(meta);
+              container.appendChild(card);
+            });
+          }).catch(e=>{ console.log('Failed to fetch skins', e); const container = document.getElementById('skinsContainer'); container.innerHTML = '<div style="padding:12px;color:#ddd">Failed to query skins</div>'; });
+        }
+        function deactivateSkin(id){
+          fetch('/api/skins/'+encodeURIComponent(id)+'/deactivate', {method:'POST'}).then(r=>{
+            if(r.ok) { showToast('Deactivated '+id+'', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Deactivation failed', 'error'); }
+          }).catch(e=>{ showToast('Deactivation error', 'error'); console.log(e); });
+        }
+        function resetToDefault(){
+          fetch('/api/skins/default', {method:'POST'}).then(r=>{
+            if(r.ok){ showToast('Reverted to default', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Failed to revert', 'error'); }
+          }).catch(e=>{ showToast('Failed to revert', 'error'); console.log(e); });
+        }
+        function activateSkin(id){
+          fetch('/api/skins/'+encodeURIComponent(id)+'/activate', {method:'POST'}).then(r=>{
+            if(r.ok) { showToast('Activated '+id+'', 'success'); setTimeout(()=>{ closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Activation failed', 'error'); }
+          }).catch(e=>{ showToast('Activation error', 'error'); console.log(e); });
+        }
+        // Install a skin file (tar/gzip/zip) - encode to base64 and send to server
+        async function installSkin(file, activate=false){
+          try{
+            // server enforces max decoded size about 10MB; let's block larger files early
+            if (file.size > 15 * 1024 * 1024) { showToast('File too large (>15MB)', 'error'); return; }
+            const arr = await new Promise((resolve,reject)=>{ const fr = new FileReader(); fr.onerror = ()=>reject(fr.error); fr.onload = ()=>resolve(fr.result); fr.readAsArrayBuffer(file); });
+            // convert arraybuffer to base64
+            const bytes = new Uint8Array(arr);
+            let binary = '';
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+              binary += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes.subarray(i, Math.min(i + chunk, bytes.length))));
+            }
+            const b64 = btoa(binary);
+            const bodyObj = { archive: b64 };
+            if (activate) bodyObj.activate = "true";
+            // Use XHR so we can track upload progress reliably
+            const progressEl = document.getElementById('skinUploadProgress');
+            progressEl.value = 0; progressEl.style.display = 'inline-block';
+            showToast('Uploading skin...','success');
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/skins/upload');
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.upload.onprogress = function(e){
+              if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressEl.value = pct;
+              }
+            };
+            const payload = JSON.stringify(bodyObj);
+            const prom = new Promise((resolve, reject) => {
+              xhr.onload = function(){
+                progressEl.style.display = 'none';
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  try{ const res = JSON.parse(xhr.responseText); resolve({ok:true, body: res}); } catch(e){ resolve({ok:true, body: null}); }
+                } else { resolve({ok:false, status: xhr.status, body: xhr.responseText}); }
+              };
+              xhr.onerror = function(){ progressEl.style.display = 'none'; reject(new Error('Upload failed')); };
+            });
+            xhr.send(payload);
+            const resp = await prom;
+            if (!resp.ok) { showToast('Upload failed', 'error'); return; }
+            const j = resp.body; if (j && j.installed) { showToast('Installed '+j.installed, 'success'); setTimeout(()=>{ refreshSkinsList(); closeSkinsModal(); window.location.reload(); }, 350); } else { showToast('Install failed', 'error'); }
+          } catch (e){ console.log('installSkin error', e); showToast('Install error', 'error'); }
+        }
+        async function removeSkin(id){
+          try{
+            const resp = await fetch('/api/skins/'+encodeURIComponent(id)+'/remove', {method:'POST'});
+            if (resp.ok) { showToast('Removed '+id, 'success'); setTimeout(()=>{ refreshSkinsList(); closeSkinsModal(); window.location.reload(); }, 350); }
+            else { showToast('Failed to remove skin', 'error'); }
+          } catch(e){ console.log('removeSkin error', e); showToast('Failed to remove skin', 'error'); }
+        }
       });
     </script>
   </body>
