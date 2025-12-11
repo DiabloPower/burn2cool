@@ -6,7 +6,8 @@ BIN=${ROOT}/cpu_throttle
 CTL=${ROOT}/cpu_throttle_ctl
 TEST_SCRIPT=${ROOT}/tests/test_cli_excluded_types.sh
 
-echo "Integration tests: build binaries and run daemon"
+echo "=== Comprehensive Test Suite ==="
+echo "Running build, API tests, CTL tests, and legacy regression tests"
 cd "$ROOT"
 make -j2
 
@@ -35,16 +36,33 @@ if [[ $timeout -eq 0 ]]; then
   echo "Daemon didn't create socket in time"; exit 2
 fi
 
-echo "Running CLI test script..."
+echo "Running comprehensive API tests..."
+chmod +x "$ROOT/tests/test_api_complete.sh"
+"$ROOT/tests/test_api_complete.sh"
+
+echo "Running comprehensive CTL flag tests..."
+chmod +x "$ROOT/tests/test_ctl_flags.sh"
+"$ROOT/tests/test_ctl_flags.sh"
+
+echo "Running legacy regression tests..."
+echo "Running CLI excluded-types tests..."
 chmod +x "$TEST_SCRIPT"
 "$TEST_SCRIPT"
 
 echo "Running HTTP excluded-types tests..."
 chmod +x "$ROOT/tests/test_http_excluded_types.sh"
 "$ROOT/tests/test_http_excluded_types.sh"
+
 echo "Running normalization tests..."
 chmod +x "$ROOT/tests/test_normalize_excluded_types.sh"
 "$ROOT/tests/test_normalize_excluded_types.sh"
 
-echo "Integration tests passed"
+echo "🎉 All comprehensive tests passed!"
+echo ""
+echo "Test coverage:"
+echo "  • Build verification"
+echo "  • Complete API endpoint testing"
+echo "  • Complete CTL command/flag testing"
+echo "  • Legacy regression tests (excluded-types)"
+echo ""
 exit 0

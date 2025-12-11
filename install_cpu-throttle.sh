@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check if running as root, if not, restart with sudo
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script requires root privileges. Restarting with sudo..."
-    exec sudo "$0" "$@"
-fi
-
 # If executed remotely (via curl), download and execute locally to avoid issues
 if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH_SOURCE[0]}" == http* ]]; then
     echo "Remote execution detected - downloading script locally for proper execution..."
-    
+
     # Create temp directory
     TEMP_DIR=$(mktemp -d)
     SCRIPT_PATH="$TEMP_DIR/install_cpu-throttle.sh"
-    
+
     # Download the script using GitHub API to avoid caching issues
     if command -v curl >/dev/null 2>&1; then
         DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/DiabloPower/burn2cool/contents/install_cpu-throttle.sh" | sed -n 's/.*"download_url": "\([^"]*\)".*/\1/p')
@@ -36,7 +30,7 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
         echo "ERROR: Neither curl nor wget available for downloading script"
         exit 1
     fi
-    
+
     # Make executable and run locally
     chmod +x "$SCRIPT_PATH"
     # Mark that this is a temp execution for cleanup
@@ -44,6 +38,12 @@ if [ "${BASH_SOURCE[0]:-}" = "-" ] || [ -z "${BASH_SOURCE[0]:-}" ] || [[ "${BASH
     export BURN2COOL_TEMP_DIR="$TEMP_DIR"
     exec "$SCRIPT_PATH" "$@"
     exit 0
+fi
+
+# Check if running as root, if not, restart with sudo
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script requires root privileges. Restarting with sudo..."
+    exec sudo "$0" "$@"
 fi
 
 # Ignore SIGTERM to prevent remote termination
@@ -170,6 +170,7 @@ while (( "$#" )); do
     --install-skin) INSTALL_SKIN_ARCHIVE="${2:-}"; shift ;;
     --debug-install) DEBUG_INSTALL=1 ;;
     --web-port) WEB_ENABLE=1; WEB_PORT="${2:-}"; shift ;;
+    --enable-firewall) ENABLE_FIREWALL=1 ;;
     --help|-h)
       cat <<USAGE
 Usage: $(basename "$0") [options]
@@ -183,6 +184,7 @@ Usage: $(basename "$0") [options]
   --quiet                          Reduce output
   --debug-install                  Save debug artifacts to /tmp
   --web-port <port>                Enable web API with a specific port
+  --enable-firewall                Enable firewall port configuration
 USAGE
       exit 0
       ;;
@@ -201,14 +203,16 @@ log "===========================================================================
 log " Burn2Cool installer for ${BINARY_NAME} (temperature-based CPU governor)"
 log " Repo: https://github.com/${REPO_OWNER}/${REPO_NAME}"
 log " This will:"
-log "  - Interactively select components (daemon, ctl, tui, gui, web API, firewall)"
+log "  - Interactively select components (daemon, ctl, tui, gui, web API*, firewall**)"
 log "  - Download prebuilt binaries or build from source"
 log "  - Install dependencies automatically (if supported)"
 log "  - Stage files in a temp dir for processing"
 log "  - Stop any running services and install new binaries"
-log "  - Configure web API and firewall (if selected)"
+log "  - Configure web API* and firewall** (if selected)"
 log "  - Install GUI components and create desktop entries"
 log "  - Create/refresh systemd service and start it"
+log "  * Web API enabled by default for local access"
+log "  ** Firewall requires explicit --enable-firewall flag"
 log "=============================================================================="
 
 # =========================
@@ -489,13 +493,27 @@ _multiselect_menu() {
 
 # Present interactive component selection and populate WANT_* globals
 component_selection() {
-  # Defaults: select all when non-interactive flag is set
+  # Check if this is an existing installation (for backward compatibility)
+  local existing_install=0
+  if [ -f "/etc/cpu_throttle.conf" ] || [ -f "/usr/local/bin/cpu_throttle" ] || systemctl is-active --quiet cpu_throttle 2>/dev/null; then
+    existing_install=1
+    log "Existing installation detected - using conservative defaults for compatibility"
+  fi
+  
+  # Defaults: web API enabled for new installs, disabled for existing (backward compatibility)
   local options=("daemon (cpu_throttle)" "ctl (cpu_throttle_ctl)" "tui (cpu_throttle_tui)" "gui (GUI zip)" "--- Settings ---" "web API" "firewall ports" "systemd service")
-  local defaults=("true" "true" "true" "true" "false" "false" "false" "false")
+  local defaults=("true" "true" "true" "true" "false" "true" "false" "false")
+  if [ "$existing_install" -eq 1 ]; then
+    defaults=("true" "true" "true" "true" "false" "false" "false" "false")
+  fi
+  
   local selected=()
   if [ "${YES:-0}" -eq 1 ] || [ "${AUTO_YES:-0}" -eq 1 ]; then
-    # keep defaults true
-    selected=("true" "true" "true" "true" "false" "true" "true" "true")
+    # For non-interactive: use defaults, but firewall false unless explicitly enabled
+    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "${defaults[5]}" "false" "${defaults[7]}")
+    if [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then
+      selected[6]="true"
+    fi
   else
     # Offer a quick single-select first (download mode), then component multiselect
     printf "Select download mode:\nUse arrow keys to navigate, Space to toggle, Enter to confirm, q to quit.\n\n"
@@ -526,7 +544,7 @@ component_selection() {
   if [ "${selected[2]}" = "true" ]; then WANT_TUI=1; fi
   if [ "${selected[3]}" = "true" ]; then WANT_GUI=1; fi
   if [ "${selected[5]}" = "true" ]; then WANT_WEB=1; fi
-  if [ "${selected[6]}" = "true" ]; then WANT_FIREWALL=1; fi
+  if [ "${selected[6]}" = "true" ] || [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then WANT_FIREWALL=1; fi
   if [ "${selected[7]}" = "true" ]; then WANT_SERVICE=1; fi
 
   log "Component selection: daemon=$WANT_DAEMON ctl=$WANT_CTL tui=$WANT_TUI gui=$WANT_GUI web=$WANT_WEB firewall=$WANT_FIREWALL service=$WANT_SERVICE"
@@ -1368,14 +1386,54 @@ if [ "${WANT_DAEMON:-0}" -eq 1 ] && [ "$BIN_INSTALLED" -eq 0 ]; then
 fi
 
 # Remove legacy binaries if present
-if [ -f "/usr/local/bin/cpu-throttle" ]; then
-  log "Removing legacy binary /usr/local/bin/cpu-throttle"
-  sudo rm -f /usr/local/bin/cpu-throttle
-fi
-if [ -f "/usr/local/bin/cpu_throttle-ctl" ]; then
-  log "Removing legacy binary /usr/local/bin/cpu_throttle-ctl"
-  sudo rm -f /usr/local/bin/cpu_throttle-ctl
-fi
+cleanup_legacy_files() {
+  log "Checking for legacy files from previous versions..."
+  
+  # Legacy binaries (various naming schemes from v1)
+  local legacy_binaries=(
+    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
+    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
+    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
+    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
+    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
+    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
+  )
+  
+  for binary in "${legacy_binaries[@]}"; do
+    if [ -f "$binary" ]; then
+      log "Removing legacy binary: $binary"
+      sudo rm -f "$binary"
+    fi
+  done
+  
+  # Legacy systemd services
+  local legacy_services=(
+    "cpu-throttle"      # v1 service with dash
+    "cpu_throttle"      # v1 service with underscore
+  )
+  
+  for service in "${legacy_services[@]}"; do
+    # Stop and disable service first, then remove files
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      log "Stopping legacy systemd service: $service"
+      sudo systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+      log "Disabling legacy systemd service: $service"
+      sudo systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+    # Only remove service file after service is stopped and disabled
+    if [ -f "/etc/systemd/system/${service}.service" ]; then
+      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
+      sudo rm -f "/etc/systemd/system/${service}.service"
+    fi
+  done
+  
+  # Reload systemd to pick up changes
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+cleanup_legacy_files
 
 # =========================
 # Port selection and web API enablement

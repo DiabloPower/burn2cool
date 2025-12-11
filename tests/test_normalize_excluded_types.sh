@@ -5,6 +5,11 @@ BIN=${ROOT}/cpu_throttle_ctl
 API_URL=http://127.0.0.1:8086
 
 echo "Testing normalization via CLI and HTTP"
+
+# Save original excluded types
+ORIGINAL_EXCLUDED=$( $BIN get-excluded-types 2>/dev/null || echo "none" )
+echo "Original excluded types: $ORIGINAL_EXCLUDED"
+
 ${BIN} set-excluded-types none
 ${BIN} set-excluded-types --merge " WiFi ,   INT3400 "
 res=$(${BIN} get-excluded-types 2>/dev/null || true)
@@ -25,4 +30,9 @@ else
 fi
 
 echo "Normalization tests passed"
+
+# Restore original excluded types
+echo "Restoring original excluded types: $ORIGINAL_EXCLUDED"
+${BIN} set-excluded-types "$ORIGINAL_EXCLUDED"
+
 exit 0

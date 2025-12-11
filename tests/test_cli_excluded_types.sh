@@ -8,6 +8,10 @@ function runcmd() { echo "$@"; "$@"; }
 
 echo "Starting CLI excluded-types tests"
 
+# Save original excluded types
+ORIGINAL_EXCLUDED=$( $BIN get-excluded-types 2>/dev/null || echo "none" )
+echo "Original excluded types: $ORIGINAL_EXCLUDED"
+
 runcmd $BIN set-excluded-types none
 
 # Toggle wifi on
@@ -74,5 +78,9 @@ else
 fi
 
 echo 'All CLI exclude-type tests passed.'
+
+# Restore original excluded types
+echo "Restoring original excluded types: $ORIGINAL_EXCLUDED"
+runcmd $BIN set-excluded-types "$ORIGINAL_EXCLUDED"
 
 exit 0

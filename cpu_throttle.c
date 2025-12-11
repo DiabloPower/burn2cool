@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <libgen.h>
+#include <spawn.h>
 #include <ctype.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -648,6 +649,26 @@ static int skin_allows_extra_js(const char *id) {
     if (strncmp(q, "true", 4) == 0) return 1; else return 0;
 }
 
+/* Execute a command using posix_spawn and return exit status.
+ * Returns -1 on spawn failure, otherwise the command's exit status. */
+static int spawn_command(const char *path, char *const argv[]) {
+    pid_t pid;
+    int status;
+    
+    int rc = posix_spawn(&pid, path, NULL, NULL, argv, NULL);
+    if (rc != 0) {
+        LOG_ERROR("posix_spawn failed for %s: %s\n", path, strerror(rc));
+        return -1;
+    }
+    
+    if (waitpid(pid, &status, 0) == -1) {
+        LOG_ERROR("waitpid failed for %s\n", path);
+        return -1;
+    }
+    
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 /* Install a skin archive from a temporary path. This performs a secure extraction using
  * execvp to avoid shell injection, and copies the extracted content into SKINS_DIR/<id>.
  * The caller must enforce admin constraints and check request authentication as needed. */
@@ -675,83 +696,29 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (r >= 2 && sig[0] == 'P' && sig[1] == 'K') use_zip = 1; // zip
 
     int rc = -1;
-    // Try common extraction patterns: gzip tar, plain tar, unzip using execvp for security
+    // Try common extraction patterns: gzip tar, plain tar, unzip using posix_spawn for security
     if (use_tar) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            execlp("tar", "tar", "-xzf", archive_path, "-C", staging, NULL);
-            _exit(1);
-        } else if (pid > 0) {
-            int status;
-            waitpid(pid, &status, 0);
-            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        } else {
-            rc = -1;
-        }
+        char *argv_gz[] = {"tar", "-xzf", (char*)archive_path, "-C", (char*)staging, NULL};
+        rc = spawn_command("/usr/bin/tar", argv_gz);
         if (rc != 0) {
             // try plain tar (uncompressed)
-            pid_t pid2 = fork();
-            if (pid2 == 0) {
-                execlp("tar", "tar", "-xf", archive_path, "-C", staging, NULL);
-                _exit(1);
-            } else if (pid2 > 0) {
-                int status;
-                waitpid(pid2, &status, 0);
-                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            } else {
-                rc = -1;
-            }
+            char *argv_plain[] = {"tar", "-xf", (char*)archive_path, "-C", (char*)staging, NULL};
+            rc = spawn_command("/usr/bin/tar", argv_plain);
         }
     } else if (use_zip) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            execlp("unzip", "unzip", "-q", archive_path, "-d", staging, NULL);
-            _exit(1);
-        } else if (pid > 0) {
-            int status;
-            waitpid(pid, &status, 0);
-            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        } else {
-            rc = -1;
-        }
+        char *argv_unzip[] = {"unzip", "-q", (char*)archive_path, "-d", (char*)staging, NULL};
+        rc = spawn_command("/usr/bin/unzip", argv_unzip);
     } else {
         // unknown: try gzip tar first, then plain tar, then unzip
-        pid_t pid = fork();
-        if (pid == 0) {
-            execlp("tar", "tar", "-xzf", archive_path, "-C", staging, NULL);
-            _exit(1);
-        } else if (pid > 0) {
-            int status;
-            waitpid(pid, &status, 0);
-            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        } else {
-            rc = -1;
+        char *argv_gz[] = {"tar", "-xzf", (char*)archive_path, "-C", (char*)staging, NULL};
+        rc = spawn_command("/usr/bin/tar", argv_gz);
+        if (rc != 0) {
+            char *argv_plain[] = {"tar", "-xf", (char*)archive_path, "-C", (char*)staging, NULL};
+            rc = spawn_command("/usr/bin/tar", argv_plain);
         }
         if (rc != 0) {
-            pid_t pid2 = fork();
-            if (pid2 == 0) {
-                execlp("tar", "tar", "-xf", archive_path, "-C", staging, NULL);
-                _exit(1);
-            } else if (pid2 > 0) {
-                int status;
-                waitpid(pid2, &status, 0);
-                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            } else {
-                rc = -1;
-            }
-        }
-        if (rc != 0) {
-            pid_t pid3 = fork();
-            if (pid3 == 0) {
-                execlp("unzip", "unzip", "-q", archive_path, "-d", staging, NULL);
-                _exit(1);
-            } else if (pid3 > 0) {
-                int status;
-                waitpid(pid3, &status, 0);
-                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            } else {
-                rc = -1;
-            }
+            char *argv_unzip[] = {"unzip", "-q", (char*)archive_path, "-d", (char*)staging, NULL};
+            rc = spawn_command("/usr/bin/unzip", argv_unzip);
         }
     }
         if (rc != 0) { /* failed to extract */
@@ -2504,8 +2471,8 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                             snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", normalized);
                             excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
                             int sr = save_config_file();
-                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.400s (saved to %.200s)\n", excluded_types_config, saved_config_path);
-                            else snprintf(response, sizeof(response), "OK: excluded types set to %.400s (not saved)\n", excluded_types_config);
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.200s (saved to %.100s)\n", excluded_types_config, saved_config_path);
+                            else snprintf(response, sizeof(response), "OK: excluded types set to %.200s (not saved)\n", excluded_types_config);
                         }
                     } else {
                         snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
