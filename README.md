@@ -31,7 +31,9 @@ sudo ./cpu_throttle
 ```bash
 # non-interactive (installs everything: daemon, ctl, tui, gui, web API, service)
 curl -fsSL https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh | bash -s -- --yes
+```
 
+```bash
 # or download and run locally
 wget https://raw.githubusercontent.com/DiabloPower/burn2cool/main/install_cpu-throttle.sh
 bash install_cpu-throttle.sh --yes
