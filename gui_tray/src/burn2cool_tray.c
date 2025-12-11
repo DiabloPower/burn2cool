@@ -25,7 +25,7 @@
 #define DEFAULT_PORT 8086
 #define DEFAULT_HOST "http://localhost"
 /* update when releasing new versions */
-#define APP_VERSION "v0.4.0"
+#define APP_VERSION "v0.4.1"
 
 typedef struct {
     char *data;
@@ -96,10 +96,8 @@ static const char *get_loc(const char *path, const char *fallback) {
 }
 
 // Try to load a locale JSON file from i18n/<lang>.json (relative to current working dir).
-static struct json_object *load_locale(const char *lang) {
+static void load_locale(const char *lang) {
     char path[PATH_MAX];
-    FILE *f;
-    struct json_object *root = NULL;
 
     snprintf(path, sizeof(path), "/usr/local/share/burn2cool_tray/i18n/%s.json", lang);
     char *content = read_file_to_string(path);
