@@ -1278,6 +1278,8 @@ stop_daemon() {
 
 stop_daemon
 
+cleanup_legacy_files
+
 # =========================
 # Install binaries
 # =========================
@@ -1452,8 +1454,6 @@ cleanup_legacy_files() {
   # Reload systemd to pick up changes
   sudo systemctl daemon-reload >/dev/null 2>&1 || true
 }
-
-cleanup_legacy_files
 
 # =========================
 # Port selection and web API enablement
