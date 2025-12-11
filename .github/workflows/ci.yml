@@ -7,14 +7,20 @@ on:
     branches: [ 'beta', 'main', 'master' ]
 
 jobs:
-  build-and-test:
+  validate-build:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Install build dependencies
-      run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libncurses5-dev libncursesw5-dev
-    - name: Build
-      run: make -j2
+      run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libncurses5-dev libncursesw5-dev libgtk-3-dev libayatana-appindicator3-dev libcurl4-openssl-dev libjson-c-dev libnotify-dev
+    - name: Generate assets
+      run: make assets
+    - name: Validate main build
+      run: make -n  # Dry-run: check if build commands are valid without executing
+    - name: Validate GUI tray build
+      run: cd gui_tray && make -n  # Check GUI tray build validity
+    - name: Syntax check all C files
+      run: |
+        find . -name "*.c" -exec gcc -fsyntax-only -Iinclude -Igui_tray/include {} \;
     - name: Run integration tests
       run: ./tests/run_integration_tests.sh
-      # run_integration_tests.sh launches the daemon as current user and runs the test suite
