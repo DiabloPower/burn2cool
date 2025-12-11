@@ -509,8 +509,8 @@ component_selection() {
   
   local selected=()
   if [ "${YES:-0}" -eq 1 ] || [ "${AUTO_YES:-0}" -eq 1 ]; then
-    # For non-interactive: use defaults, but firewall false unless explicitly enabled
-    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "${defaults[5]}" "false" "${defaults[7]}")
+    # For non-interactive: use defaults, but web API and service always enabled for --yes
+    selected=("${defaults[0]}" "${defaults[1]}" "${defaults[2]}" "${defaults[3]}" "${defaults[4]}" "true" "${defaults[6]}" "true")
     if [ "${ENABLE_FIREWALL:-0}" -eq 1 ]; then
       selected[6]="true"
     fi
@@ -570,9 +570,7 @@ choose_mode() {
     echo "binaries"; return
   fi
   # If GUI is selected, force source mode (GUI needs source to build)
-  if [ "${WANT_GUI:-0}" -eq 1 ]; then
-    echo "source"; return
-  fi
+  # Removed: GUI can be built from zip in binaries mode
   if [ "$FORCE_BUILD" -eq 1 ]; then echo "source"; return; fi
   if [ "$FORCE_BINARIES" -eq 1 ]; then echo "binaries"; return; fi
   if [ "$YES" -eq 1 ] || [ "$AUTO_YES" -eq 1 ]; then echo "binaries"; return; fi
@@ -621,6 +619,9 @@ filter_assets_and_download() {
     mapfile -t names < <(for u in "${urls[@]}"; do basename "$u"; done)
   fi
 
+  log "Available assets: ${names[*]}"
+  log "Matching patterns: ${patterns[*]}"
+
   local selected=0
   # Build desired patterns from interactive selection
   local patterns=()
@@ -630,6 +631,7 @@ filter_assets_and_download() {
   if [ "${WANT_GUI:-0}" -eq 1 ] && [ "${GUI_BUILT:-0}" -eq 0 ]; then patterns+=("gui" "tray" "burn2cool_tray" "gui_tray"); fi
   for i in "${!names[@]}"; do
     n="${names[$i]}"; u="${urls[$i]}"
+    log "Checking asset: $n"
     # skip scripts/build metadata
     if [[ "$n" =~ \.sh$ ]] || [[ "$n" =~ autobuild ]]; then
       continue
@@ -648,6 +650,7 @@ filter_assets_and_download() {
     if [ "$match" -eq 0 ]; then
       continue
     fi
+    log "Downloading asset: $n"
     # download: archives allowed for GUI (zip/tar), binaries get executable bit
     if [[ "$n" =~ \.(zip|tar\.gz|tgz)$ ]]; then
       download_url "$u" "$WORK_DIR/$n"
@@ -829,7 +832,14 @@ download_source_and_build() {
     # pipeline. This step is intentionally tolerant of failures so the build
     # proceeds even on systems without xxd (fallback to include/ if available).
     (cd "$src_dir" && if make $MAKE_SHELL_ARG assets 2>/dev/null || true; then true; fi)
-    (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" )
+    
+    # Build only selected components
+    local make_targets="assets"
+    if [ "${WANT_DAEMON:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle"; fi
+    if [ "${WANT_CTL:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle_ctl"; fi
+    if [ "${WANT_TUI:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle_tui"; fi
+    
+    (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" $make_targets )
   else
     (cd "$src_dir" && make)
   fi
@@ -1006,7 +1016,14 @@ download_explicit_url() {
 
 mode="$(choose_mode)"
 case "$mode" in
-  binaries) filter_assets_and_download ;;
+  binaries) 
+    if ! filter_assets_and_download; then
+      warn "Binary download failed, falling back to source build."
+      log "Checking build dependencies..."
+      check_and_install_deps
+      download_source_and_build
+    fi
+    ;;
   source)
     log "Checking build dependencies..."
     check_and_install_deps
@@ -1261,6 +1278,56 @@ stop_daemon() {
 
 stop_daemon
 
+# Remove legacy binaries if present
+cleanup_legacy_files() {
+  log "Checking for legacy files from previous versions..."
+  
+  # Legacy binaries (various naming schemes from v1)
+  local legacy_binaries=(
+    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
+    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
+    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
+    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
+    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
+    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
+  )
+  
+  for binary in "${legacy_binaries[@]}"; do
+    if [ -f "$binary" ]; then
+      log "Removing legacy binary: $binary"
+      sudo rm -f "$binary"
+    fi
+  done
+  
+  # Legacy systemd services
+  local legacy_services=(
+    "cpu-throttle"      # v1 service with dash
+    "cpu_throttle"      # v1 service with underscore
+  )
+  
+  for service in "${legacy_services[@]}"; do
+    # Stop and disable service first, then remove files
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      log "Stopping legacy systemd service: $service"
+      sudo systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+      log "Disabling legacy systemd service: $service"
+      sudo systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+    # Only remove service file after service is stopped and disabled
+    if [ -f "/etc/systemd/system/${service}.service" ]; then
+      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
+      sudo rm -f "/etc/systemd/system/${service}.service"
+    fi
+  done
+  
+  # Reload systemd to pick up changes
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+cleanup_legacy_files
+
 # =========================
 # Install binaries
 # =========================
@@ -1269,14 +1336,17 @@ install_bin_if_present() {
   local name="$1" dest="$2"
   for candidate in "$WORK_DIR/$name" "${WORK_DIR}/${name//_/-}"; do
     if [ -f "$candidate" ]; then
-      log "Installing $(basename "$candidate") to $dest"
-      if ! sudo install -m 0755 "$candidate" "$dest"; then
-        warn "Failed to install $candidate to $dest (continuing)"
+      log "Found candidate: $candidate (size: $(stat -c%s "$candidate" 2>/dev/null || echo "unknown"), executable: $([ -x "$candidate" ] && echo "yes" || echo "no"))"
+      if sudo install -m 0755 "$candidate" "$dest"; then
+        log "Successfully installed $candidate to $dest"
+        return 0
+      else
+        err "Failed to install $candidate to $dest"
+        return 1
       fi
-      return 0
     fi
   done
-  log "No candidate found for $name"
+  log "No candidate found for $name in $WORK_DIR"
   return 1
 }
 
@@ -1384,56 +1454,6 @@ fi
 if [ "${WANT_DAEMON:-0}" -eq 1 ] && [ "$BIN_INSTALLED" -eq 0 ]; then
   warn "Core daemon ($BINARY_NAME) was not found in staged artifacts. Continuing anyway."
 fi
-
-# Remove legacy binaries if present
-cleanup_legacy_files() {
-  log "Checking for legacy files from previous versions..."
-  
-  # Legacy binaries (various naming schemes from v1)
-  local legacy_binaries=(
-    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
-    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
-    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
-    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
-    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
-    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
-  )
-  
-  for binary in "${legacy_binaries[@]}"; do
-    if [ -f "$binary" ]; then
-      log "Removing legacy binary: $binary"
-      sudo rm -f "$binary"
-    fi
-  done
-  
-  # Legacy systemd services
-  local legacy_services=(
-    "cpu-throttle"      # v1 service with dash
-    "cpu_throttle"      # v1 service with underscore
-  )
-  
-  for service in "${legacy_services[@]}"; do
-    # Stop and disable service first, then remove files
-    if systemctl is-active --quiet "$service" 2>/dev/null; then
-      log "Stopping legacy systemd service: $service"
-      sudo systemctl stop "$service" >/dev/null 2>&1 || true
-    fi
-    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
-      log "Disabling legacy systemd service: $service"
-      sudo systemctl disable "$service" >/dev/null 2>&1 || true
-    fi
-    # Only remove service file after service is stopped and disabled
-    if [ -f "/etc/systemd/system/${service}.service" ]; then
-      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
-      sudo rm -f "/etc/systemd/system/${service}.service"
-    fi
-  done
-  
-  # Reload systemd to pick up changes
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-cleanup_legacy_files
 
 # =========================
 # Port selection and web API enablement

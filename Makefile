@@ -62,12 +62,12 @@ all: assets $(TARGETS)
 test: all
 	./tests/run_integration_tests.sh
 
-cpu_throttle: cpu_throttle.c
+cpu_throttle: assets cpu_throttle.c
 	$(CC) $(CFLAGS) -o $@ cpu_throttle.c $(LDFLAGS)
 
-cpu_throttle_tui: cpu_throttle_tui.c
+cpu_throttle_tui: assets cpu_throttle_tui.c
 	$(CC) $(CFLAGS) -o $@ cpu_throttle_tui.c -lncurses $(LDFLAGS)
 
-cpu_throttle_ctl: cpu_throttle_ctl.c
+cpu_throttle_ctl: assets cpu_throttle_ctl.c
 	$(CC) $(CFLAGS) -o $@ cpu_throttle_ctl.c $(LDFLAGS)
 
