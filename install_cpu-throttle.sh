@@ -570,9 +570,7 @@ choose_mode() {
     echo "binaries"; return
   fi
   # If GUI is selected, force source mode (GUI needs source to build)
-  if [ "${WANT_GUI:-0}" -eq 1 ]; then
-    echo "source"; return
-  fi
+  # Removed: GUI can be built from zip in binaries mode
   if [ "$FORCE_BUILD" -eq 1 ]; then echo "source"; return; fi
   if [ "$FORCE_BINARIES" -eq 1 ]; then echo "binaries"; return; fi
   if [ "$YES" -eq 1 ] || [ "$AUTO_YES" -eq 1 ]; then echo "binaries"; return; fi
@@ -621,6 +619,9 @@ filter_assets_and_download() {
     mapfile -t names < <(for u in "${urls[@]}"; do basename "$u"; done)
   fi
 
+  log "Available assets: ${names[*]}"
+  log "Matching patterns: ${patterns[*]}"
+
   local selected=0
   # Build desired patterns from interactive selection
   local patterns=()
@@ -648,6 +649,7 @@ filter_assets_and_download() {
     if [ "$match" -eq 0 ]; then
       continue
     fi
+    log "Downloading asset: $n"
     # download: archives allowed for GUI (zip/tar), binaries get executable bit
     if [[ "$n" =~ \.(zip|tar\.gz|tgz)$ ]]; then
       download_url "$u" "$WORK_DIR/$n"
@@ -829,7 +831,14 @@ download_source_and_build() {
     # pipeline. This step is intentionally tolerant of failures so the build
     # proceeds even on systems without xxd (fallback to include/ if available).
     (cd "$src_dir" && if make $MAKE_SHELL_ARG assets 2>/dev/null || true; then true; fi)
-    (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" )
+    
+    # Build only selected components
+    local make_targets="assets"
+    if [ "${WANT_DAEMON:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle"; fi
+    if [ "${WANT_CTL:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle_ctl"; fi
+    if [ "${WANT_TUI:-0}" -eq 1 ]; then make_targets="$make_targets cpu_throttle_tui"; fi
+    
+    (cd "$src_dir" && make $MAKE_SHELL_ARG -j"$(nproc)" $make_targets )
   else
     (cd "$src_dir" && make)
   fi
@@ -1006,7 +1015,14 @@ download_explicit_url() {
 
 mode="$(choose_mode)"
 case "$mode" in
-  binaries) filter_assets_and_download ;;
+  binaries) 
+    if ! filter_assets_and_download; then
+      warn "Binary download failed, falling back to source build."
+      log "Checking build dependencies..."
+      check_and_install_deps
+      download_source_and_build
+    fi
+    ;;
   source)
     log "Checking build dependencies..."
     check_and_install_deps
@@ -1269,14 +1285,17 @@ install_bin_if_present() {
   local name="$1" dest="$2"
   for candidate in "$WORK_DIR/$name" "${WORK_DIR}/${name//_/-}"; do
     if [ -f "$candidate" ]; then
-      log "Installing $(basename "$candidate") to $dest"
-      if ! sudo install -m 0755 "$candidate" "$dest"; then
-        warn "Failed to install $candidate to $dest (continuing)"
+      log "Found candidate: $candidate (size: $(stat -c%s "$candidate" 2>/dev/null || echo "unknown"), executable: $([ -x "$candidate" ] && echo "yes" || echo "no"))"
+      if sudo install -m 0755 "$candidate" "$dest"; then
+        log "Successfully installed $candidate to $dest"
+        return 0
+      else
+        err "Failed to install $candidate to $dest"
+        return 1
       fi
-      return 0
     fi
   done
-  log "No candidate found for $name"
+  log "No candidate found for $name in $WORK_DIR"
   return 1
 }
 
