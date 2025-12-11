@@ -108,8 +108,15 @@ static char *socket_get(const char *cmd) {
 }
 
 static char *http_get(const char *path) {
+    // Try socket first (more resource-efficient)
+    char *result = NULL;
+    if (strcmp(path, "/api/status") == 0) {
+        result = socket_get("status json");
+    }
+    if (result) return result;
+
     if (use_http_first) {
-        // Try HTTP first
+        // Fallback to HTTP if socket failed and HTTP is preferred
         CURL *curl = curl_easy_init();
         if (curl) {
             MemoryChunk chunk = { .data = malloc(1), .size = 0 };
@@ -127,34 +134,6 @@ static char *http_get(const char *path) {
             }
             free(chunk.data);
         }
-    }
-
-    // Try socket
-    char *result = NULL;
-    if (strcmp(path, "/api/status") == 0) {
-        result = socket_get("status json");
-    }
-    if (result) return result;
-
-    if (!use_http_first) {
-        // Fallback to HTTP
-        CURL *curl = curl_easy_init();
-        if (!curl) return NULL;
-        MemoryChunk chunk = { .data = malloc(1), .size = 0 };
-        char *url = http_build_url(path);
-        if (!url) { free(chunk.data); curl_easy_cleanup(curl); return NULL; }
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&chunk);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
-        CURLcode res = curl_easy_perform(curl);
-        free(url);
-        curl_easy_cleanup(curl);
-        if (res != CURLE_OK) {
-            free(chunk.data);
-            return NULL;
-        }
-        return chunk.data;
     }
 
     return NULL;
@@ -436,7 +415,8 @@ static gboolean poll_cb(gpointer user_data) {
 /* Public API */
 void overview_set_port(int port) {
     http_port = port;
-    use_http_first = 1; // since port is set, prefer HTTP
+    // Don't force HTTP preference - let it use socket first for efficiency
+    // use_http_first remains 0 (socket preferred) unless explicitly set
 }
 
 void overview_show(GtkWindow *parent) {
