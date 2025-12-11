@@ -62,9 +62,9 @@ Files in this repo
 - `cpu_throttle.c` — daemon source
 - `cpu_throttle_ctl.c` — control utility source  
 - `cpu_throttle_tui.c` — optional ncurses TUI source
-- `cpu_throttle_ctl.c` — GUI tray application source
+- `gui_tray/src/` — GUI tray application source
 - `install_cpu-throttle.sh` — installer script (builds/installs and sets up service); supports `--install-skin <archive>` to install a system skin and activate it
-- `Makefile`, `assets/`, `include/`, `gui_tray/`
+- `Makefile`, `assets/`, `include/`
 
 ---
 
