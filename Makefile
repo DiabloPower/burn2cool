@@ -58,6 +58,10 @@ TARGETS := cpu_throttle cpu_throttle_tui cpu_throttle_ctl
 .DEFAULT_GOAL := all
 all: assets $(TARGETS)
 
+.PHONY: test
+test: all
+	./tests/run_integration_tests.sh
+
 cpu_throttle: cpu_throttle.c
 	$(CC) $(CFLAGS) -o $@ cpu_throttle.c $(LDFLAGS)
 

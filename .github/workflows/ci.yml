@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [ 'beta', 'main', 'master' ]
+  pull_request:
+    branches: [ 'beta', 'main', 'master' ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libncurses5-dev libncursesw5-dev
+    - name: Build
+      run: make -j2
+    - name: Run integration tests
+      run: ./tests/run_integration_tests.sh
+      # run_integration_tests.sh launches the daemon as current user and runs the test suite

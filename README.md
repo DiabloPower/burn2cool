@@ -38,6 +38,7 @@ Key notes
 - The web dashboard and REST API are embedded in the daemon (default port 8086). Configure via `/etc/cpu_throttle.conf` or `--web-port`.
 - `make assets` converts files in `assets/` into `include/*.h` (the Makefile falls back to a Python generator if `xxd` is missing).
 - Runtime control is available via the Unix socket (default `/tmp/cpu_throttle.sock`) using the `cpu_throttle_ctl` helper.
+	- The `cpu_throttle_ctl` control helper also supports `get-excluded-types`, `toggle-excluded <token>`, and `set-excluded-types --merge|--remove` to manage excluded thermal types without clobbering global settings.
 
 Where to find more
 -------------------
@@ -109,6 +110,11 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
 --temp-max <temp>      Maximum temperature threshold in °C (default: 95, range: 50-110)
 --help                 Show help message
 --install-skin <file>  Install a skin archive (tar.gz or zip) and activate it system-wide
+
+Quick CLI tips:
+- Use `cpu_throttle_ctl get-excluded-types` to inspect current excluded types without overwriting.
+- `cpu_throttle_ctl toggle-excluded wifi` toggles a token (substring matching by default).
+- `cpu_throttle_ctl set-excluded-types --merge int3400,wifi` merges tokens into the current list; `--remove` supports removal and `--exact` restricts to exact matches.
 ```
 
 ---

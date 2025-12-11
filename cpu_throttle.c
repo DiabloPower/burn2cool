@@ -1287,9 +1287,9 @@ void build_status_json(char *buffer, size_t size) {
              "\"sensor\":\"%s\","
              "\"thermal_zone\":%d,"
              "\"use_avg_temp\":%s,"
-             "\"running_user\":\"%s\""
+            "\"running_user\":\"%s\",\"web_port\":%d"
              "}",
-             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false", uname);
+             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false", uname, web_port);
 }
 
 void build_metrics_json(char *buffer, size_t size) {
@@ -1749,7 +1749,7 @@ void handle_http_request(int client_fd, const char *request) {
     
     LOG_VERBOSE("HTTP %s %s\n", method, path);
     
-    char response[2048]; int rc = -1;
+    char response[2048]; int rc = -1; (void)rc;
     // Serve skin files under /skins/<id>/<file>
     if (strncmp(path, "/skins/", 7) == 0) {
         const char *p = path + 7;
@@ -2427,7 +2427,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
             }
 
             // Parse command
-            char cmd[64], arg[192]; int rc = -1;
+            char cmd[64], arg[192]; int rc = -1; (void)rc;
             char response[512];
 
             // Find first space to split cmd and arg
@@ -2486,7 +2486,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                 else if (strcmp(cmd, "set-use-avg-temp") == 0 && sscanf(arg, "%d", &use_avg_temp) == 1) {
                     use_avg_temp = use_avg_temp ? 1 : 0;
                     int sr = save_config_file();
-                        if (sr == 0) snprintf(response, sizeof(response), "OK: use_avg_temp set to %d (saved to %s)\n", use_avg_temp, saved_config_path);
+                        if (sr == 0) snprintf(response, sizeof(response), "OK: use_avg_temp set to %d (saved to %.256s)\n", use_avg_temp, saved_config_path);
                         else snprintf(response, sizeof(response), "OK: use_avg_temp set to %d (not saved)\n", use_avg_temp);
                 }
                 else if (strcmp(cmd, "set-excluded-types") == 0) {
@@ -2497,7 +2497,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         if (strcmp(normalized, "none") == 0 || strcmp(normalized, "clear") == 0) {
                             excluded_types_config[0] = '\0';
                             int sr = save_config_file();
-                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types cleared (saved to %s)\n", saved_config_path);
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types cleared (saved to %.256s)\n", saved_config_path);
                             else snprintf(response, sizeof(response), "OK: excluded types cleared (not saved)\n");
                         } else if (normalized[0] == '\0') {
                             snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
@@ -2505,7 +2505,7 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                             strncpy(excluded_types_config, normalized, sizeof(excluded_types_config)-1);
                             excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
                             int sr = save_config_file();
-                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.480s (saved to %s)\n", excluded_types_config, saved_config_path);
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.480s (saved to %.256s)\n", excluded_types_config, saved_config_path);
                             else snprintf(response, sizeof(response), "OK: excluded types set to %.480s (not saved)\n", excluded_types_config);
                         }
                     } else {

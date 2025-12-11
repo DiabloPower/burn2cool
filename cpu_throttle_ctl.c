@@ -19,6 +19,8 @@
 
 #define SOCKET_PATH "/tmp/cpu_throttle.sock"
 
+#define MAX_EXCL_TOKENS 128
+#define MAX_EXCL_TOKEN_LEN 128
 // Constants for buffer sizes and limits
 #define CMD_BUFFER_SIZE 512
 #define INITIAL_RESPONSE_CAPACITY 32768
@@ -92,6 +94,82 @@ static void print_json_pretty_or_raw(const char *json) {
     unlink(tmp_template);
 }
 
+// Normalize token: trim whitespace, strip quotes, lower-case
+static void normalize_token_inline(char *t) {
+    // trim leading
+    char *s = t;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (s != t) memmove(t, s, strlen(s) + 1);
+    // trim trailing
+    int len = (int)strlen(t);
+    while (len > 0 && isspace((unsigned char)t[len-1])) t[--len] = '\0';
+    // strip surrounding quotes
+    if (t[0] == '"' && t[len-1] == '"' && len > 1) {
+        memmove(t, t+1, len-2);
+        t[len-2] = '\0';
+        len -= 2;
+    }
+    // lowercase
+    for (int i=0;i<len;i++) t[i] = (char)tolower((unsigned char)t[i]);
+}
+
+// Parse a CSV or space-separated token list into tokens[]; modifies inp_buffer
+static int parse_csv_to_tokens(char *inp_buffer, char tokens[][MAX_EXCL_TOKEN_LEN], int max_tokens) {
+    int count = 0;
+    if (!inp_buffer || !*inp_buffer) return 0;
+    char *p = inp_buffer;
+    // split on comma
+    char *saveptr;
+    char *tok = strtok_r(p, ",", &saveptr);
+    while (tok && count < max_tokens) {
+        strncpy(tokens[count], tok, MAX_EXCL_TOKEN_LEN-1);
+        tokens[count][MAX_EXCL_TOKEN_LEN-1] = '\0';
+        normalize_token_inline(tokens[count]);
+        if (tokens[count][0] != '\0') count++;
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    return count;
+}
+
+static void join_tokens_to_csv(char tokens[][MAX_EXCL_TOKEN_LEN], int count, char *out, int out_len) {
+    out[0] = '\0';
+    for (int i = 0; i < count; i++) {
+        if (i > 0) strncat(out, ",", out_len - strlen(out) - 1);
+        strncat(out, tokens[i], out_len - strlen(out) - 1);
+    }
+}
+
+// remove tokens that either match exactly (exact=1) or contain subst (exact=0) from tokens[]; returns new count
+static int remove_matching_tokens(char tokens[][MAX_EXCL_TOKEN_LEN], int count, const char *match, int exact) {
+    int out = 0;
+    for (int i=0;i<count;i++) {
+        int keep = 1;
+        if (match && match[0]) {
+            if (exact) {
+                if (strcmp(tokens[i], match) == 0) keep = 0;
+            } else {
+                if (strstr(tokens[i], match) != NULL) keep = 0;
+            }
+        }
+        if (keep) {
+            if (out != i) strncpy(tokens[out], tokens[i], MAX_EXCL_TOKEN_LEN);
+            out++;
+        }
+    }
+    return out;
+}
+
+static int token_in_list(char tokens[][MAX_EXCL_TOKEN_LEN], int count, const char *match, int exact) {
+    for (int i=0;i<count;i++) {
+        if (exact) {
+            if (strcmp(tokens[i], match) == 0) return 1;
+        } else {
+            if (strstr(tokens[i], match) != NULL) return 1;
+        }
+    }
+    return 0;
+}
+
 void ensure_profile_dir() {
     char *dir = get_profile_dir();
     // Create ~/.config if needed
@@ -137,6 +215,11 @@ void print_help(const char *name) {
     printf("  set-thermal-zone <num> Set thermal zone (-1=auto, 0-100)\n");
     printf("  set-use-avg-temp <0|1> Use average CPU temperature (0=no, 1=yes)\n");
     printf("  set-excluded-types <csv>  Comma-separated thermal type names to exclude (e.g. INT3400,INT3402)\n");
+    printf("    --merge <csv>         Merge the supplied csv into existing excluded types (no overwrite)\n");
+    printf("    --remove <csv>        Remove tokens from existing excluded types (substring matching)\n");
+    printf("  get-excluded-types        Print the current excluded types CSV (accepts --json/-j and --pretty/-p)\n");
+    printf("  toggle-excluded <token>   Toggle presence of <token> in excluded types (substring match by default).\n");
+    printf("                            Use --exact to only match exact tokens.\n");
     printf("  status                 Show current status\n");
     printf("  quit                   Shutdown cpu_throttle daemon\n");
     printf("\nProfile commands:\n");
@@ -736,6 +819,131 @@ int main(int argc, char *argv[]) {
             char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
         }
         return send_command("zones");
+    }
+
+    // get-excluded-types: support optional --json/-j or --pretty/-p
+    if (strcmp(argv[1], "get-excluded-types") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("get-excluded-types json"); if (!resp) { fprintf(stderr, "Error: failed to query excluded types\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("get-excluded-types");
+    }
+
+    // toggle-excluded: toggle a token in the excluded-types list (non-destructive merge)
+    if (strcmp(argv[1], "toggle-excluded") == 0) {
+        int exact = 0; int argi = 2;
+        if (argc >= 3 && (strcmp(argv[2], "--exact") == 0)) { exact = 1; argi = 3; }
+        if (argc <= argi) { fprintf(stderr, "Error: token required for toggle-excluded\n"); return 1; }
+        char token_raw[MAX_EXCL_TOKEN_LEN]; strncpy(token_raw, argv[argi], sizeof(token_raw)-1); token_raw[sizeof(token_raw)-1] = '\0'; normalize_token_inline(token_raw);
+        if (token_raw[0] == '\0') { fprintf(stderr, "Error: invalid token\n"); return 1; }
+        // query current csv
+        char *cur = send_command_get_response("get-excluded-types"); if (!cur) {
+            // Empty response is considered an empty CSV; proceed with empty string
+            cur = strdup("");
+        }
+        // cur may contain newline(s) — trim
+        char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+        char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+        free(cur);
+        // check if already present
+        int present = token_in_list(tokens, count, token_raw, exact);
+        if (present) {
+            // remove matching tokens
+            count = remove_matching_tokens(tokens, count, token_raw, exact);
+        } else {
+            // add token
+            if (count + 1 < MAX_EXCL_TOKENS) {
+                strncpy(tokens[count], token_raw, MAX_EXCL_TOKEN_LEN-1);
+                tokens[count][MAX_EXCL_TOKEN_LEN-1] = '\0';
+                count++;
+            } else {
+                fprintf(stderr, "Error: too many excluded tokens (limit %d)\n", MAX_EXCL_TOKENS); return 1;
+            }
+        }
+        // build csv
+        char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+        char cmdb[4096];
+        if (count == 0) {
+            snprintf(cmdb, sizeof(cmdb), "set-excluded-types none");
+        } else {
+            // Avoid potential overflow warnings by constructing string safely
+            snprintf(cmdb, sizeof(cmdb), "set-excluded-types ");
+            strncat(cmdb, newcsv, sizeof(cmdb) - strlen(cmdb) - 1);
+        }
+        char *resp2 = send_command_get_response(cmdb);
+        if (!resp2) {
+            // if the daemon returned no response (e.g., empty), fall back to printing via send_command
+            fprintf(stderr, "Warning: server returned no response; attempting to print via send_command\n");
+            send_command(cmdb);
+        } else {
+            printf("%s\n", resp2);
+            free(resp2);
+        }
+        return 0;
+    }
+
+    // Add two new features to set-excluded-types: --merge (add) and --remove (remove tokens)
+    if (strcmp(argv[1], "set-excluded-types") == 0) {
+        if (argc >= 3 && strcmp(argv[2], "--merge") == 0) {
+            if (argc < 4) { fprintf(stderr, "Error: missing CSV argument for --merge\n"); return 1; }
+            // get existing CSV
+            char *cur = send_command_get_response("get-excluded-types"); if (!cur) { cur = strdup(""); }
+            char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+            char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+            free(cur);
+            // parse new csv (first non-flag argument)
+            const char *csv_arg = NULL;
+            for (int j = 3; j < argc; j++) { if (argv[j][0] != '-') { csv_arg = argv[j]; break; } }
+            if (!csv_arg) { fprintf(stderr, "Error: missing CSV argument for --merge\n"); return 1; }
+            char argbuf[1024]; strncpy(argbuf, csv_arg, sizeof(argbuf)-1); argbuf[sizeof(argbuf)-1] = '\0';
+            char newtokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int ncount = parse_csv_to_tokens(argbuf, newtokens, MAX_EXCL_TOKENS);
+            // add tokens not present
+            for (int i=0;i<ncount;i++) {
+                if (!token_in_list(tokens, count, newtokens[i], 1)) {
+                    if (count + 1 < MAX_EXCL_TOKENS) {
+                        strncpy(tokens[count], newtokens[i], MAX_EXCL_TOKEN_LEN-1); tokens[count][MAX_EXCL_TOKEN_LEN-1] = '\0'; count++;
+                    }
+                }
+            }
+            char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+            char cmdb[4096]; if (count == 0) snprintf(cmdb, sizeof(cmdb), "set-excluded-types none"); else { snprintf(cmdb, sizeof(cmdb), "set-excluded-types "); strncat(cmdb, newcsv, sizeof(cmdb) - strlen(cmdb) - 1); }
+            char *resp = send_command_get_response(cmdb); if (!resp) { fprintf(stderr, "Error: failed to set-excluded-types\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
+        if (argc >= 3 && strcmp(argv[2], "--remove") == 0) {
+            int exact_remove = 0; const char *csv_arg = NULL;
+            for (int j = 3; j < argc; j++) {
+                if (strcmp(argv[j], "--exact") == 0) { exact_remove = 1; continue; }
+                if (argv[j][0] == '-') continue;
+                csv_arg = argv[j]; break;
+            }
+            if (!csv_arg) { fprintf(stderr, "Error: missing CSV argument for --remove\n"); return 1; }
+            char *cur = send_command_get_response("get-excluded-types"); if (!cur) { cur = strdup(""); }
+            char *nl = strchr(cur, '\n'); if (nl) *nl = '\0';
+            char tokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int count = parse_csv_to_tokens(cur, tokens, MAX_EXCL_TOKENS);
+            free(cur);
+            char argbuf[1024]; strncpy(argbuf, csv_arg, sizeof(argbuf)-1); argbuf[sizeof(argbuf)-1] = '\0';
+            char removetokens[MAX_EXCL_TOKENS][MAX_EXCL_TOKEN_LEN]; int rcount = parse_csv_to_tokens(argbuf, removetokens, MAX_EXCL_TOKENS);
+            if (verbose) {
+                fprintf(stderr, "DEBUG: existing tokens (%d):\n", count);
+                for (int i=0;i<count;i++) fprintf(stderr, "  - '%s'\n", tokens[i]);
+                fprintf(stderr, "DEBUG: removetokens (%d):\n", rcount);
+                for (int i=0;i<rcount;i++) fprintf(stderr, "  - '%s'\n", removetokens[i]);
+                fprintf(stderr, "DEBUG: exact_remove=%d\n", exact_remove);
+                fprintf(stderr, "DEBUG: csv_arg=%s\n", csv_arg);
+            }
+            for (int i=0;i<rcount;i++) {
+                if (verbose) fprintf(stderr, "DEBUG: removing '%s' (exact=%d)\n", removetokens[i], exact_remove);
+                count = remove_matching_tokens(tokens, count, removetokens[i], exact_remove ? 1 : 0);
+            }
+            if (verbose) {
+                fprintf(stderr, "DEBUG: tokens after removal (%d):\n", count);
+                for (int i=0;i<count;i++) fprintf(stderr, "  - '%s'\n", tokens[i]);
+            }
+            char newcsv[4096]; join_tokens_to_csv(tokens, count, newcsv, sizeof(newcsv));
+            char cmdb[4096]; if (count == 0) snprintf(cmdb, sizeof(cmdb), "set-excluded-types none"); else { snprintf(cmdb, sizeof(cmdb), "set-excluded-types "); strncat(cmdb, newcsv, sizeof(cmdb) - strlen(cmdb) - 1); }
+            char *resp = send_command_get_response(cmdb); if (!resp) { fprintf(stderr, "Error: failed to set-excluded-types\n"); return 1; } printf("%s\n", resp); free(resp); return 0;
+        }
     }
 
     // Build command string for daemon

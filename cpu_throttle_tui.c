@@ -80,6 +80,73 @@ char* pretty_print_json(const char* json) {
     return buf;
 }
 
+// Pretty print just the first-level key:value pairs of a JSON object
+// Strips JSON punctuation (braces, quotes, trailing commas) and returns a buffer
+char* pretty_print_status_kv(const char *json) {
+    static char buf[4096];
+    char *out = buf; buf[0] = '\0';
+    if (!json || *json == '\0') return buf;
+    const char *p = json;
+    // skip to first opening '{'
+    while (*p && *p != '{') p++;
+    if (!p || *p != '{') return buf;
+    p++; // move inside object
+    while (*p && *p != '}') {
+        // skip whitespace & commas
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (!*p || *p == '}') break;
+        // get key (assume "key")
+        if (*p == '"') {
+            p++; const char *kstart = p; char key[128] = "";
+            while (*p && *p != '"') p++;
+            if (*p == '"') {
+                size_t klen = (size_t)(p - kstart);
+                if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+                strncpy(key, kstart, klen); key[klen] = '\0';
+                p++; // after closing quote
+                // skip spaces and colon
+                while (*p && isspace((unsigned char)*p)) p++;
+                if (*p == ':') p++; while (*p && isspace((unsigned char)*p)) p++;
+                // value: could be string, number, object, array
+                if (*p == '"') {
+                    p++; const char *vstart = p; while (*p && *p != '"') p++; size_t vlen = (size_t)(p - vstart); char val[256] = "";
+                    if (vlen >= sizeof(val)) vlen = sizeof(val) - 1; strncpy(val, vstart, vlen); val[vlen] = '\0';
+                    p++; // skip closing quote
+                    out += sprintf(out, "%s: %s\n", key, val);
+                } else if (*p == '{') {
+                    // nested object, skip until matching '}' and show placeholder
+                    int depth = 1; const char *vstart = p; p++;
+                    while (*p && depth > 0) { if (*p == '{') depth++; else if (*p == '}') depth--; p++; }
+                    out += sprintf(out, "%s: {...}\n", key);
+                } else if (*p == '[') {
+                    // array: skip until matching ']'
+                    int depth = 1; p++;
+                    while (*p && depth > 0) { if (*p == '[') depth++; else if (*p == ']') depth--; p++; }
+                    out += sprintf(out, "%s: [...]\n", key);
+                } else {
+                    // number or bareword: read until comma or closing brace
+                    const char *vstart = p; while (*p && *p != ',' && *p != '}') p++; size_t vlen = (size_t)(p - vstart); char val[256] = "";
+                    // strip whitespace at end
+                    while (vlen > 0 && isspace((unsigned char)vstart[vlen-1])) vlen--;
+                    // trim trailing commas if any
+                    if (vlen > 0 && vstart[vlen-1] == ',') vlen--;
+                    if (vlen >= sizeof(val)) vlen = sizeof(val)-1; strncpy(val, vstart, vlen); val[vlen] = '\0';
+                    // trim leading whitespace
+                    char *vp = val; while (*vp && isspace((unsigned char)*vp)) vp++;
+                    out += sprintf(out, "%s: %s\n", key, vp);
+                }
+            } else break; // no matching key end
+        } else {
+            // Not a quoted key: skip until next comma or brace
+            while (*p && *p != ',' && *p != '}') p++;
+            if (*p == ',') p++;
+        }
+    }
+    // ensure buffer terminates
+    out[0] = buf[0];
+    return buf;
+}
+
 // Human-readable formatter for limits/zones JSON
 char* format_limits_zones(const char* json, int is_limits) {
     static char buf[4096];
@@ -145,6 +212,93 @@ char* format_limits_zones(const char* json, int is_limits) {
     return buf;
 }
 
+// First-level status JSON to nice key: value representation for the TUI status pane
+char* format_status_kv(const char* json) {
+    static char buf[4096]; char temp[128]; buf[0] = '\0';
+    if (!json || !json[0]) return buf;
+    // Extract a numeric or string value following a key
+    char *p;
+    // temperature
+    p = strstr(json, "\"temperature\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[64] = ""; size_t i = 0;
+            if (*p == '"') { p++; while (*p && *p != '"' && i < sizeof(val)-1) val[i++] = *p++; }
+            else { while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) { val[i++] = *p++; } }
+            val[i] = '\0';
+            if (i) { snprintf(temp, sizeof(temp), "temperature: %s °C", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // frequency
+    p = strstr(json, "\"frequency\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[64] = ""; size_t i = 0;
+            if (*p == '"') { p++; while (*p && *p != '"' && i < sizeof(val)-1) val[i++] = *p++; }
+            else { while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) { val[i++] = *p++; } }
+            val[i] = '\0';
+            if (i) { snprintf(temp, sizeof(temp), "frequency: %s kHz", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // safe_min
+    p = strstr(json, "\"safe_min\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[64] = ""; size_t i = 0;
+            if (*p == '"') { p++; while (*p && *p != '"' && i < sizeof(val)-1) val[i++] = *p++; }
+            else { while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) { val[i++] = *p++; } }
+            val[i] = '\0'; if (i) { snprintf(temp, sizeof(temp), "safe_min: %s kHz", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // safe_max
+    p = strstr(json, "\"safe_max\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[64] = ""; size_t i = 0;
+            if (*p == '"') { p++; while (*p && *p != '"' && i < sizeof(val)-1) val[i++] = *p++; }
+            else { while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) { val[i++] = *p++; } }
+            val[i] = '\0'; if (i) { snprintf(temp, sizeof(temp), "safe_max: %s kHz", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // running_user
+    p = strstr(json, "\"running_user\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[128] = ""; size_t i = 0;
+            if (*p == '"') { p++; while (*p && *p != '"' && i < sizeof(val)-1) val[i++] = *p++; }
+            else { while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) { val[i++] = *p++; } }
+            val[i] = '\0'; if (i) { snprintf(temp, sizeof(temp), "running_user: %s", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // use_avg_temp
+    p = strstr(json, "\"use_avg_temp\"");
+    if (p) {
+        p = strchr(p, ':'); if (p) p++; while (p && *p && isspace((unsigned char)*p)) p++;
+        if (p) {
+            char val[16] = ""; size_t i = 0; while (*p && *p != ',' && *p != '}' && i < sizeof(val)-1) val[i++] = *p++; val[i] = '\0';
+            if (i) { snprintf(temp, sizeof(temp), "use_avg_temp: %s", val); strncat(buf, temp, sizeof(buf)-strlen(buf)-1); strncat(buf, "\n", sizeof(buf)-strlen(buf)-1); }
+        }
+    }
+    // fallback: if nothing was extracted, clean up the raw JSON slightly
+    if (buf[0] == '\0') {
+        char tmp[4096], out[4096]; strncpy(tmp, json, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+        for (char *q = tmp; *q; ++q) { if (*q == '{' || *q == '}' || *q == '"') *q = ' '; }
+        for (char *q = tmp; *q; ++q) { if (*q == ',') *q = ' '; }
+        // collapse whitespace
+        char *s = tmp; char *d = out; while (*s && (d - out) < (int)sizeof(out)-1) {
+            if (isspace((unsigned char)*s)) { *d++ = ' '; while (isspace((unsigned char)*s)) s++; }
+            else *d++ = *s++;
+        }
+        *d = '\0'; snprintf(buf, sizeof(buf), "%s", out);
+    }
+    return buf;
+}
+
 // Shared state updated by poller/worker threads
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t last_msg_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -160,6 +314,8 @@ static char last_msg[256] = "";
 static volatile int keep_running = 1;
 static volatile int help_visible = 0;
 static int help_offset = 0;
+static volatile int show_raw_status = 0; // toggle to show full raw JSON status in popup
+static int data_horiz_offset = 0; // horizontal scroll for data panes
 // Modes: 0=limits, 1=zones, 2=skins, 3=profiles
 static int current_mode = 0;
 static int mode_count = 4;
@@ -172,6 +328,10 @@ static int skins_sel = 0;
 static int skins_offset = 0;
 static char skins_list[256][256];
 static int skins_count = 0;
+// Limits selection state
+static int limits_sel = 0;
+static int limits_offset = 0;
+static int limits_count = 0;
 
 
 // Helper: get current value of use_avg_temp from status_buf; returns 0 or 1 or -1 if not available
@@ -200,11 +360,82 @@ static int get_running_user(char *out, size_t outsz) {
     while (*p && isspace((unsigned char)*p)) p++;
     // accept "name" or plain value
     if (*p == '"') {
-        p++; char *q = strchr(p, '"'); if (!q) return -1; size_t len = q - p; if (len >= outsz) len = outsz - 1; strncpy(out, p, len); out[len] = '\0'; return 0;
+        p++;
+        char *q = strchr(p, '"'); if (!q) return -1;
+        size_t len = q - p;
+        if (len >= outsz) len = outsz - 1;
+        strncpy(out, p, len);
+        out[len] = '\0';
+        // trim whitespace
+        while (len > 0 && isspace((unsigned char)out[len-1])) { out[--len] = '\0'; }
+        while (*out && isspace((unsigned char)*out)) { memmove(out, out+1, strlen(out)); }
+        return 0;
     } else {
         char *q = p; size_t len = 0; while (*q && !isspace((unsigned char)*q) && *q != ',' && *q != '}') { q++; len++; }
-        if (len >= outsz) len = outsz - 1; strncpy(out, p, len); out[len] = '\0'; return 0;
+        if (len >= outsz) len = outsz - 1;
+        strncpy(out, p, len);
+        out[len] = '\0';
+        // trim trailing whitespace
+        while (len > 0 && isspace((unsigned char)out[len-1])) { out[--len] = '\0'; }
+        while (*out && isspace((unsigned char)*out)) { memmove(out, out+1, strlen(out)); }
+        return 0;
     }
+}
+
+static int get_web_port_from_status(void) {
+    pthread_mutex_lock(&state_lock);
+    char local[4096]; strncpy(local, status_buf, sizeof(local)-1); local[sizeof(local)-1] = '\0';
+    pthread_mutex_unlock(&state_lock);
+    char *p = strstr(local, "\"web_port\"");
+    if (!p) return 0;
+    p = strchr(p, ':'); if (!p) return 0; p++;
+    while (*p && isspace((unsigned char)*p)) p++;
+    int val = atoi(p);
+    return val;
+}
+
+// Print a window line with optional horizontal scroll and ellipsis for non-selected rows
+static void mvwprintw_scrollable(WINDOW *win, int row, int col, int width, const char *s, int offset, int selected) {
+    size_t len = strlen(s);
+        if ((int)len <= width) { 
+            mvwprintw(win, row, col, "%s", s);
+            wmove(win, row, col + width); wclrtoeol(win);
+        return;
+    }
+    if (!selected) {
+        // show left anchored with ellipsis
+        if (width > 3) {
+                char buf[512]; strncpy(buf, s, width - 3); buf[width - 3] = '\0';
+            mvwprintw(win, row, col, "%s...", buf);
+            wmove(win, row, col + width); wclrtoeol(win);
+        } else {
+            mvwprintw(win, row, col, "%.*s", width, s);
+            wmove(win, row, col + width); wclrtoeol(win);
+        }
+        return;
+    }
+    // selected: show substring starting at offset, add ellipsis if truncated on either end
+    if (offset < 0) offset = 0;
+    int ellWidth = 3; // '...'
+    int leftEll = (offset > 0) ? 1 : 0;
+    // provisional avail conservatively assumes no right ellipsis
+    int avail = width - (leftEll ? ellWidth : 0);
+    if (avail < 1) avail = 1;
+    // if even with left ellipsis width we still have characters after offset, maybe right ell
+    int rightEll = ((offset + avail) < (int)len) ? 1 : 0;
+    // recompute avail with both ellipses considered
+    avail = width - (leftEll ? ellWidth : 0) - (rightEll ? ellWidth : 0);
+    if (avail < 1) avail = 1;
+    int maxOffset = (int)len - avail;
+    if (maxOffset < 0) maxOffset = 0;
+    if (offset > maxOffset) offset = maxOffset;
+    const char *start = s + offset;
+    char buf2[4096]; strncpy(buf2, start, avail); buf2[avail] = '\0';
+    int x = col;
+    if (leftEll) { mvwprintw(win, row, x, "..."); x += 3; }
+    mvwprintw(win, row, x, "%s", buf2); x += avail;
+    if (rightEll) { mvwprintw(win, row, x, "..."); }
+    wmove(win, row, col + width); wclrtoeol(win);
 }
 
 /* forward declarations */
@@ -1066,10 +1297,15 @@ int main() {
     if (has_colors()) { start_color(); init_pair(1, COLOR_GREEN, -1); init_pair(2, COLOR_YELLOW, -1); init_pair(3, COLOR_RED, -1); }
     getmaxyx(stdscr, height, width);
     WINDOW *status = newwin(7, width-2, 1, 1);
-    WINDOW *data = newwin(height-13, 40, 9, 1);
-    // Make help window match the data window height so it can show all lines
-    WINDOW *helpwin = newwin(height-13, width-44, 9, 42);
-    WINDOW *inputwin = newwin(3, width-2, height-4, 1);
+    int data_w = help_visible ? (width - 44) : (width - 2);
+    if (data_w < 20) data_w = 20;
+    WINDOW *data = newwin(height-13, data_w, 9, 1);
+    // Make help window match the data window height so it can show all lines; hidden = 0 width
+    WINDOW *helpwin = NULL;
+    if (help_visible) helpwin = newwin(height-13, width - data_w - 3, 9, data_w + 2);
+    WINDOW *inputwin = newwin(3, width-2, height-6, 1);
+    // footer window occupies last two lines: Msg at row 0, keys at row 1
+    WINDOW *footerwin = newwin(2, width, height-2, 0);
     mvprintw(0,2,"cpu_throttle TUI");
     mvprintw(0,20,"Press 'h' for help | Tab: switch mode");
     refresh();
@@ -1088,6 +1324,37 @@ int main() {
     // (using prompt_input and prompt_char helpers defined above)
 
     while (1) {
+        // recreate/resized windows on change (help visible toggles size)
+        int new_data_w = help_visible ? (width - 44) : (width - 2);
+        if (new_data_w < 20) new_data_w = 20;
+        // recalc terminal size on each loop (in case of resize)
+        getmaxyx(stdscr, height, width);
+        if (new_data_w != getmaxx(data)) {
+            delwin(data);
+            data = newwin(height-13, new_data_w, 9, 1);
+            if (inputwin) {
+                wresize(inputwin, 3, width-2);
+                mvwin(inputwin, height-6, 1);
+            } else {
+                inputwin = newwin(3, width-2, height-6, 1);
+            }
+            if (footerwin) {
+                wresize(footerwin, 2, width);
+                mvwin(footerwin, height-2, 0);
+            } else {
+                footerwin = newwin(2, width, height-2, 0);
+            }
+            // Ensure the main screen is repainted and clear any remnants from previous window sizes
+            touchwin(stdscr);
+            refresh();
+        }
+        // (recreate help if needed)
+        if (help_visible) {
+            if (!helpwin) helpwin = newwin(height-13, width - new_data_w - 3, 9, new_data_w + 2);
+            else wresize(helpwin, height-13, width - new_data_w - 3);
+        } else {
+            if (helpwin) { delwin(helpwin); helpwin = NULL; touchwin(stdscr); refresh(); }
+        }
         werase(status); box(status, 0,0);
         mvwprintw(status, 0,2," Status ");
         // display cached status (updated by poller)
@@ -1099,35 +1366,136 @@ int main() {
         pthread_mutex_lock(&last_msg_lock); strncpy(local_msg, last_msg, sizeof(local_msg)-1); local_msg[sizeof(local_msg)-1]='\0'; pthread_mutex_unlock(&last_msg_lock);
         // print response lines
         int cur_avg = get_use_avg_temp();
-        mvwprintw(status, 1, 40, "Avg temp usage: %s", cur_avg < 0 ? "n/a" : (cur_avg ? "true" : "false"));
-        char run_user[64] = "";
+        // Prepare pretty printed status if JSON, and compute columns dynamically
+        char pretty_status[4096]; pretty_status[0] = '\0';
+        char status_summary[4096]; status_summary[0] = '\0';
+        if (local_status[0] == '{' || local_status[0] == '[') {
+            // Keep pretty JSON for raw popup
+            strncpy(pretty_status, pretty_print_json(local_status), sizeof(pretty_status)-1);
+            pretty_status[sizeof(pretty_status)-1] = '\0';
+            // Use key/value formatted string with units for the left pane
+            strncpy(status_summary, format_status_kv(local_status), sizeof(status_summary)-1);
+            status_summary[sizeof(status_summary)-1] = '\0';
+        } else {
+            strncpy(pretty_status, local_status, sizeof(pretty_status)-1);
+            pretty_status[sizeof(pretty_status)-1] = '\0';
+            strncpy(status_summary, local_status, sizeof(status_summary)-1);
+            status_summary[sizeof(status_summary)-1] = '\0';
+        }
+        int maxx_status = getmaxx(status);
+        int h_status = getmaxy(status);
+        int desired_right_col_width = (maxx_status >= 100) ? 36 : (maxx_status >= 80 ? 28 : 20);
+        int min_left_width = 20; int min_right_width = 12;
+        int right_col_width = desired_right_col_width;
+        if (right_col_width > maxx_status/3) right_col_width = maxx_status/3;
+        int left_max_width = maxx_status - right_col_width - 6;
+        if (left_max_width < min_left_width) {
+            // adjust right_col_width to give left column some space
+            right_col_width = maxx_status - min_left_width - 6;
+            if (right_col_width < min_right_width) right_col_width = min_right_width;
+            left_max_width = maxx_status - right_col_width - 6;
+            if (left_max_width < 0) left_max_width = 0;
+        }
+        int right_col = 2 + left_max_width + 2;
+        // left pane may vary in height; reserve one line for 'Updated' and one for the bottom border
+        int max_left_lines = h_status - 3; if (max_left_lines < 1) max_left_lines = 1;
+        int line = 1; char *saveptr = NULL; char *p = strtok_r(status_summary, "\n", &saveptr);
+        while (p && line <= max_left_lines) {
+            size_t plen = strlen(p);
+            size_t offset = 0;
+            while (offset < plen && line <= max_left_lines) {
+                mvwprintw(status, line, 2, "%.*s", left_max_width, p + offset);
+                offset += left_max_width;
+                line++;
+            }
+            p = strtok_r(NULL, "\n", &saveptr);
+        }
+        int updated_row = max_left_lines + 1;
+        if (ts != 0) mvwprintw(status, updated_row, 2, "Updated: %ld sec ago", (long)(time(NULL)-ts));
+        else mvwprintw(status, updated_row, 2, "No update yet");
+
+        // Now print the right-column values to ensure they have priority and won't be overwritten by left column
+        char avg_buf[64]; snprintf(avg_buf, sizeof(avg_buf), "Avg temp usage: %s", cur_avg < 0 ? "n/a" : (cur_avg ? "true" : "false"));
+        if (1 <= max_left_lines) mvwprintw(status, 1, right_col, "%.*s", right_col_width, avg_buf);
+        char run_user[128] = "";
         if (get_running_user(run_user, sizeof(run_user)) == 0) {
-            mvwprintw(status, 2, 40, "Daemon user: %s", run_user);
+            const char *label = "Daemon user: ";
+            int right_space = right_col_width - (int)strlen(label);
+            if (right_space <= 0) right_space = 4; // fallback minimal space
+            if (2 <= max_left_lines) mvwprintw(status, 2, right_col, "%s%.*s", label, right_space, run_user);
             if (strcmp(run_user, "root") != 0) {
-                mvwprintw(status, 3, 40, "Warning: daemon not running as root; settings may only be saved per user");
+                if (3 <= max_left_lines) mvwprintw(status, 3, right_col, "%.*s", right_space, "Warning: daemon not running as root; settings may only be saved per user");
             }
         }
-        int line=1; char *saveptr = NULL; char *p = strtok_r(local_status, "\n", &saveptr);
-        while (p && line < 6) { mvwprintw(status, line, 2, "%s", p); p = strtok_r(NULL, "\n", &saveptr); line++; }
-        if (ts != 0) mvwprintw(status,5,2,"Updated: %ld sec ago", (long)(time(NULL)-ts));
-        else mvwprintw(status,5,2,"No update yet");
+        // (left column printed above)
         // (sparklines disabled)
         wrefresh(status);
+        // redraw header (prevents artefacts on top line when windows resize)
+        mvprintw(0,2,"cpu_throttle TUI"); mvprintw(0,20,"Press 'h' for help | Tab: switch mode"); clrtoeol();
+        // If user toggles raw status view, show a popup and wait for keypress
+        if (show_raw_status) {
+            int raw_h = getmaxy(stdscr) - 4; if (raw_h > 30) raw_h = 30; if (raw_h < 5) raw_h = 5;
+            int raw_w = getmaxx(stdscr) - 4; if (raw_w < 40) raw_w = getmaxx(stdscr) - 2;
+            int raw_y = 2; int raw_x = 2;
+            WINDOW *rawwin = newwin(raw_h, raw_w, raw_y, raw_x);
+            box(rawwin, 0, 0);
+            mvwprintw(rawwin, 0, 2, " Status JSON (press any key to close) ");
+            // print the pretty_status lines into the popup
+            int row = 1; char bufcopy[4096]; strncpy(bufcopy, pretty_status, sizeof(bufcopy)-1); bufcopy[sizeof(bufcopy)-1] = '\0';
+            char *save = NULL; char *linep = strtok_r(bufcopy, "\n", &save);
+            while (linep && row < raw_h - 1) {
+                mvwprintw(rawwin, row, 2, "%.*s", raw_w - 4, linep);
+                row++; linep = strtok_r(NULL, "\n", &save);
+            }
+            wrefresh(rawwin);
+            wgetch(rawwin); // wait for any key
+            delwin(rawwin);
+            show_raw_status = 0; // automatically close
+        }
 
+        // determine web UI presence
+        int web_port = get_web_port_from_status();
+        int webui_enabled = (web_port > 0) ? 1 : 0;
         // data window - depends on current_mode
         werase(data); box(data,0,0);
-        const char *mode_names[] = {"Limits", "Zones", "Skins", "Profiles"};
+        const char *all_mode_names[] = {"Limits", "Zones", "Profiles", "Skins"};
+        const char *mode_names[4];
+        int local_mode_count = 0;
+        mode_names[local_mode_count++] = all_mode_names[0];
+        mode_names[local_mode_count++] = all_mode_names[1];
+        mode_names[local_mode_count++] = all_mode_names[2];
+        if (webui_enabled) mode_names[local_mode_count++] = all_mode_names[3];
+        // allow the mode count to be dynamic
+        int mode_count_local = local_mode_count;
+        if (current_mode >= mode_count_local) current_mode = mode_count_local - 1;
         mvwprintw(data,0,2," %s ", mode_names[current_mode]);
         int page_lines = (height-13) - 2;
-        if (current_mode == 0) { // Limits
+            if (current_mode == 0) { // Limits
             pthread_mutex_lock(&state_lock);
             char local_limits[4096]; strncpy(local_limits, limits_buf, sizeof(local_limits)-1); local_limits[sizeof(local_limits)-1]='\0';
             time_t ts = limits_ts;
             pthread_mutex_unlock(&state_lock);
             char *pretty = format_limits_zones(local_limits, 1);
             int line=1; char *saveptr = NULL; char *p = strtok_r(pretty, "\n", &saveptr);
-            while (p && line <= page_lines) { mvwprintw(data, line, 2, "%s", p); p = strtok_r(NULL, "\n", &saveptr); line++; }
-            if (ts != 0) mvwprintw(data, page_lines+1, 2, "Updated: %ld sec ago", (long)(time(NULL)-ts));
+            // Build list of lines to track selection index
+            char lines_buf[256][256]; limits_count = 0;
+            while (p && limits_count < (int)(sizeof(lines_buf)/sizeof(lines_buf[0]))) {
+                strncpy(lines_buf[limits_count], p, sizeof(lines_buf[0])-1); lines_buf[limits_count][sizeof(lines_buf[0])-1] = '\0';
+                limits_count++; p = strtok_r(NULL, "\n", &saveptr);
+            }
+            if (limits_sel >= limits_count) limits_sel = limits_count > 0 ? limits_count - 1 : 0;
+            if (limits_sel < 0) limits_sel = 0;
+            if (limits_sel < limits_offset) limits_offset = limits_sel;
+            if (limits_sel >= limits_offset + page_lines) limits_offset = limits_sel - page_lines + 1;
+            for (int i = limits_offset; i < limits_count && line <= page_lines; ++i) {
+                int row = line;
+                int sel = (i == limits_sel);
+                if (sel) wattron(data, A_REVERSE);
+                mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, lines_buf[i], data_horiz_offset, sel);
+                if (sel) wattroff(data, A_REVERSE);
+                line++;
+            }
+            (void)ts;
         } else if (current_mode == 1) { // Zones
             pthread_mutex_lock(&state_lock);
             char local_zones[4096]; strncpy(local_zones, zones_buf, sizeof(local_zones)-1); local_zones[sizeof(local_zones)-1]='\0';
@@ -1146,12 +1514,13 @@ int main() {
                 for (int i = zones_offset; i < zones_count && i < zones_offset + page_lines; ++i) {
                     int row = i - zones_offset + 1;
                     if (i == zones_sel) wattron(data, A_REVERSE);
-                    mvwprintw(data, row, 2, "Zone %d (%s): %s %d°C", zones_arr[i].zone, zones_arr[i].type, zones_arr[i].excluded ? "Excluded" : "Included", zones_arr[i].temp);
+                    char linebuf[256]; snprintf(linebuf, sizeof(linebuf), "Zone %d (%s): %s %d°C", zones_arr[i].zone, zones_arr[i].type, zones_arr[i].excluded ? "Excluded" : "Included", zones_arr[i].temp);
+                    mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, linebuf, data_horiz_offset, (i == zones_sel));
                     if (i == zones_sel) wattroff(data, A_REVERSE);
                 }
             }
-            if (ts != 0) mvwprintw(data, page_lines+1, 2, "Updated: %ld sec ago", (long)(time(NULL)-ts));
-        } else if (current_mode == 2) { // Skins
+            (void)ts;
+        } else if (current_mode == 3) { // Skins
             pthread_mutex_lock(&state_lock);
             char local_skins[4096]; strncpy(local_skins, skins_buf, sizeof(local_skins)-1); local_skins[sizeof(local_skins)-1]='\0';
             time_t ts = skins_ts;
@@ -1173,12 +1542,12 @@ int main() {
             for (int i=0;i<skins_count && i < skins_offset + page_lines;i++) {
                 int row = i - skins_offset + 1;
                 if (i==skins_sel) wattron(data, A_REVERSE);
-                mvwprintw(data, row, 2, "%s", skins_list[i]);
+                mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, skins_list[i], data_horiz_offset, (i == skins_sel));
                 if (i==skins_sel) wattroff(data, A_REVERSE);
             }
             mvwprintw(data, page_lines+1, 2, "Skins: %d", skins_count);
-            if (ts != 0) mvwprintw(data, page_lines+1, 20, "Updated: %ld sec ago", (long)(time(NULL)-ts));
-        } else if (current_mode == 3) { // Profiles
+            (void)ts;
+        } else if (current_mode == 2) { // Profiles
             prof_count = read_profiles((char (*)[256])profs, 256);
             // apply filter into display_profs
             display_count = 0;
@@ -1196,7 +1565,7 @@ int main() {
             for (int i=0;i<display_count && i < offset + page_lines;i++) {
                 int row = i - offset + 1;
                 if (i==sel) wattron(data, A_REVERSE);
-                mvwprintw(data, row, 2, "%s", display_profs[i]);
+                mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, display_profs[i], data_horiz_offset, (i == sel));
                 if (i==sel) wattroff(data, A_REVERSE);
             }
             mvwprintw(data, page_lines+1, 2, "Profiles: %d (filter: %s)", display_count, profile_filter[0] ? profile_filter : "-");
@@ -1221,7 +1590,8 @@ int main() {
                 "UP/DN : select zone (in Zones mode)",
                 "x : toggle exclude for selected zone (in Zones mode)",
                 "v : toggle use average temp (in Zones mode)",
-                "D : stop daemon | S : start daemon",
+                "Left/Right arrows: horiz scroll selected/active line | f : view full line",
+                "D : stop daemon | S : start daemon | R : view raw status",
                 "q : quit",
                 "Space/PageDown : next page | PageUp/p : previous page",
             };
@@ -1242,32 +1612,66 @@ int main() {
             if (help_offset + page_lines < help_count) mvwprintw(helpwin, hh-1, 2, "-- more: Space/PageDown --");
             else mvwprintw(helpwin, hh-1, 2, "-- end --");
             wrefresh(helpwin);
-        } else {
-            // footer with last message
-            mvprintw(height-3, 2, "Msg: %s", local_msg);
-            clrtoeol();
-            if (current_mode == 3) { // Profiles
-                mvprintw(height-2, 2, "Keys: h help | Tab mode | l load | c create | e edit | d delete | / filter | g clear | D stop | q quit"); clrtoeol();
-            } else if (current_mode == 0) { // Limits
-                mvprintw(height-2, 2, "Keys: h help | Tab mode | s/m/t set limits | D stop | q quit"); clrtoeol();
-            } else if (current_mode == 2) { // Skins
-                mvprintw(height-2, 2, "Keys: h help | Tab mode | i install | d default | a activate | u deactivate | D stop | q quit"); clrtoeol();
-            } else if (current_mode == 1) { // Zones
-                mvprintw(height-2, 2, "Keys: h help | Tab mode | r refresh | UP/DN/nav | x toggle exclude | v toggle avg temp | D stop | q quit"); clrtoeol();
-            } else {
-                mvprintw(height-2, 2, "Keys: h help | Tab mode | r refresh | D stop | q quit"); clrtoeol();
-            }
-            refresh();
         }
+        // footer with last message: render in footer window so it's independent of other windows
+        werase(footerwin);
+        {
+            char msg[256]; snprintf(msg, sizeof(msg), "Msg: %s", local_msg);
+            mvwprintw(footerwin, 0, 1, "%.*s", width - 2, msg);
+        }
+            if (current_mode == 2) { // Profiles
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | l load | c create | e edit | d delete | / filter | g clear | q quit | R raw status | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | l load | q quit | f";
+            if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
+            else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
+        } else if (current_mode == 0) { // Limits
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | s/m/t set limits | D stop | q quit | R raw status | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | s/t set limits | q quit | f";
+            if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
+            else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
+        } else if (current_mode == 3) { // Skins
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | i install | d default | a activate | u deactivate | q quit | R raw status | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | i install | q quit | f";
+            if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
+            else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
+        } else if (current_mode == 1) { // Zones
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | UP/DN nav | x toggle exclude | v toggle avg temp | q quit | R raw status | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | r refresh | UP/DN | q quit | f";
+            if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
+            else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
+        } else {
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | r refresh | D stop | q quit | R raw status | Left/Right | f");
+            const char* ks_short = "  Keys: h help | Tab mode | q quit | f";
+            if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
+            else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
+        }
+        // draw a faint horizontal line above the footer to separate it from the main UI
+        mvhline(height-3, 0, ACS_HLINE, width);
+        refresh();
+        wrefresh(footerwin);
 
         int ch = getch();
         if (ch == 'q') { break; }
         else if (ch == '\t') { // Tab to switch mode
             current_mode = (current_mode + 1) % mode_count;
-            sel = 0; offset = 0; // reset selection
+            sel = 0; offset = 0; data_horiz_offset = 0; // reset selection and horizontal scroll
+            // force redraw of the entire screen so the new mode clears remnants
+            touchwin(stdscr);
+            refresh();
         }
         else if (ch == 'r') { /* just loop to refresh */ }
-        else if (ch == 'h' || ch == 'H' || ch == '?') { help_visible = !help_visible; if (!help_visible) { werase(helpwin); wrefresh(helpwin); } }
+        else if (ch == 'h' || ch == 'H' || ch == '?') {
+            help_visible = !help_visible;
+            if (!help_visible && helpwin) {
+                werase(helpwin);
+                wrefresh(helpwin);
+                delwin(helpwin);
+                helpwin = NULL;
+                // ensure underlying screen is repainted to remove artefacts left by the help window
+                touchwin(stdscr);
+                refresh();
+            }
+        }
         else if (help_visible && (ch == ' ' || ch == KEY_NPAGE || ch == 'n')) {
             // next page
             help_offset += (getmaxy(helpwin) - 2);
@@ -1278,12 +1682,59 @@ int main() {
             if (help_offset < 0) help_offset = 0;
             continue;
         }
-        else if (current_mode == 3 && ch == KEY_UP) { if (sel>0) sel--; }
-        else if (current_mode == 3 && ch == KEY_DOWN) { if (sel<display_count-1) sel++; }
-        else if (current_mode == 2 && ch == KEY_UP) { if (skins_sel>0) skins_sel--; }
-        else if (current_mode == 2 && ch == KEY_DOWN) { if (skins_sel<skins_count-1) skins_sel++; }
-        else if (current_mode == 1 && ch == KEY_UP) { if (zones_sel>0) zones_sel--; }
-        else if (current_mode == 1 && ch == KEY_DOWN) { if (zones_sel<zones_count-1) zones_sel++; }
+        else if (current_mode == 2 && ch == KEY_UP) { if (sel>0) sel--; data_horiz_offset = 0; }
+        else if (current_mode == 2 && ch == KEY_DOWN) { if (sel<display_count-1) sel++; data_horiz_offset = 0; }
+        else if (current_mode == 3 && ch == KEY_UP) { if (skins_sel>0) skins_sel--; data_horiz_offset = 0; }
+        else if (current_mode == 3 && ch == KEY_DOWN) { if (skins_sel<skins_count-1) skins_sel++; data_horiz_offset = 0; }
+        else if (current_mode == 1 && ch == KEY_UP) { if (zones_sel>0) zones_sel--; data_horiz_offset = 0; }
+        else if (current_mode == 1 && ch == KEY_DOWN) { if (zones_sel<zones_count-1) zones_sel++; data_horiz_offset = 0; }
+        else if (current_mode == 0 && ch == KEY_UP) { if (limits_sel>0) limits_sel--; data_horiz_offset = 0; }
+        else if (current_mode == 0 && ch == KEY_DOWN) { if (limits_sel < limits_count - 1) limits_sel++; data_horiz_offset = 0; }
+        else if (ch == KEY_LEFT) { if (data_horiz_offset > 0) data_horiz_offset -= 4; if (data_horiz_offset < 0) data_horiz_offset = 0; }
+        else if (ch == KEY_RIGHT) { data_horiz_offset += 4; }
+        else if (ch == 'f') {
+            // show full content for selected line in data pane as popup
+            if (current_mode == 1 && zones_count > 0) {
+                char buf[512]; snprintf(buf, sizeof(buf), "Zone %d (%s): %s %d°C", zones_arr[zones_sel].zone, zones_arr[zones_sel].type, zones_arr[zones_sel].excluded ? "Excluded" : "Included", zones_arr[zones_sel].temp);
+                int pw = getmaxx(stdscr)-4; int len = (int)strlen(buf) + 4; if (pw > len) pw = len; int ph = 6;
+                WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
+                box(pwin, 0,0); mvwprintw(pwin,1,2, "%s", buf); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
+            } else if (current_mode == 2 && display_count > 0) {
+                char *s = display_profs[sel]; int pw = getmaxx(stdscr)-4; int len = (int)strlen(s) + 4; if (pw > len) pw = len; int ph = 6;
+                WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
+                box(pwin,0,0); mvwprintw(pwin,1,2, "%s", s); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
+            } else if (current_mode == 3 && skins_count > 0) {
+                char *s = skins_list[skins_sel]; int pw = getmaxx(stdscr)-4; int len = (int)strlen(s) + 4; if (pw > len) pw = len; int ph = 6;
+                WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
+                box(pwin,0,0); mvwprintw(pwin,1,2, "%s", s); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
+            } else if (current_mode == 0) {
+                pthread_mutex_lock(&state_lock);
+                char local_limits[4096]; strncpy(local_limits, limits_buf, sizeof(local_limits)-1); local_limits[sizeof(local_limits)-1] = '\0';
+                pthread_mutex_unlock(&state_lock);
+                char *pretty = format_limits_zones(local_limits, 1);
+                // If limits selection exists show selected line, else show full pretty output
+                if (limits_count > 0 && limits_sel >= 0 && limits_sel < limits_count) {
+                    char bufsel[512] = "";
+                    char tmp[4096]; strncpy(tmp, pretty, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0'; char *sp = NULL; char *pp = strtok_r(tmp, "\n", &sp);
+                    int idx = 0;
+                    while (pp) {
+                        if (idx == limits_sel) { strncpy(bufsel, pp, sizeof(bufsel)-1); bufsel[sizeof(bufsel)-1] = '\0'; break; }
+                        idx++; pp = strtok_r(NULL, "\n", &sp);
+                    }
+                    if (bufsel[0] == '\0') strncpy(bufsel, "(not available)", sizeof(bufsel)-1);
+                    int pw = getmaxx(stdscr)-4; int len = (int)strlen(bufsel) + 4; if (len < 20) len = 20; if (pw > len) pw = len; int ph = 6;
+                    WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
+                    box(pwin,0,0); mvwprintw(pwin,1,2, "%s", bufsel); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
+                } else {
+                    int pw = getmaxx(stdscr)-4; if (pw > 80) pw = 80; int tmpcalc = (int)strlen(pretty) / ((pw - 4) > 0 ? (pw - 4) : 1) + 4; if (tmpcalc > 30) tmpcalc = 30; int ph = tmpcalc;
+                    WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
+                    box(pwin,0,0);
+                    int r = 1; char tmp2[4096]; strncpy(tmp2, pretty, sizeof(tmp2)-1); tmp2[sizeof(tmp2)-1] = '\0'; char *sp = NULL; char *pp = strtok_r(tmp2, "\n", &sp);
+                    while (pp && r < ph-1) { mvwprintw(pwin, r, 2, "%.*s", pw-4, pp); pp = strtok_r(NULL, "\n", &sp); r++; }
+                    mvwprintw(pwin, ph-2, 2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
+                }
+            }
+        }
         else if (current_mode == 1 && ch == KEY_NPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; zones_sel += page; if (zones_sel >= zones_count) zones_sel = zones_count - 1; }
         else if (current_mode == 1 && ch == KEY_PPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; zones_sel -= page; if (zones_sel < 0) zones_sel = 0; }
         else if (current_mode == 1 && (ch == 'x' || ch == 'X')) {
@@ -1351,7 +1802,7 @@ int main() {
                 // apply optimistic UI change to zone
                 zones_arr[zones_sel].excluded = present ? 0 : 1;
                 // send to daemon
-                char unique_types[256][64]; int unique_count = 0;
+                // unique types not required in this toggle implementation
                 char cmd[1536];
                 if (csv[0] == '\0') snprintf(cmd, sizeof(cmd), "set-excluded-types none");
                 else snprintf(cmd, sizeof(cmd), "set-excluded-types %s", csv);
@@ -1398,14 +1849,17 @@ int main() {
                 set_last_msg("set-use-avg-temp %d", newv);
             }
         }
-        else if (current_mode == 3 && ch == 'l') {
+        else if (current_mode == 2 && ch == 'l') {
             if (display_count>0) {
-                mvprintw(height-2,2,"Loading profile %s...", display_profs[sel]); clrtoeol(); refresh();
+                {
+                    char lp[256]; snprintf(lp, sizeof(lp), "Loading profile %s...", display_profs[sel]);
+                    wrefresh(footerwin);
+                }
                 spawn_load_profile_async(display_profs[sel]);
                 set_last_msg("Loading...");
             }
         }
-        else if (current_mode == 3 && ch == 'c') {
+        else if (current_mode == 2 && ch == 'c') {
             help_visible = 0;
             char name[128] = {0};
             if (prompt_input(inputwin, "Create profile name: ", name, sizeof(name)) > 0) {
@@ -1421,7 +1875,7 @@ int main() {
             }
             clrtoeol(); refresh();
         }
-        else if (current_mode == 3 && ch == 'e') {
+        else if (current_mode == 2 && ch == 'e') {
             // edit selected profile inline
             if (display_count > 0) {
                 const char *name = display_profs[sel];
@@ -1460,7 +1914,7 @@ int main() {
                 pthread_mutex_unlock(&state_lock);
             }
         }
-        else if (current_mode == 3 && ch == '/') {
+        else if (current_mode == 2 && ch == '/') {
             // filter profiles
             char f[128] = {0};
             if (prompt_input(inputwin, "Filter profiles (substring, empty to clear): ", f, sizeof(f)) >= 0) {
@@ -1470,10 +1924,10 @@ int main() {
                 set_last_msg("Filter applied");
             }
         }
-        else if (current_mode == 3 && ch == 'g') {
+        else if (current_mode == 2 && ch == 'g') {
             profile_filter[0] = '\0'; sel = 0; offset = 0; set_last_msg("Filter cleared");
         }
-        else if (current_mode == 3 && ch == 'd') {
+        else if (current_mode == 2 && ch == 'd') {
             if (display_count>0) {
                 help_visible = 0;
                 int a = 0;
@@ -1497,7 +1951,7 @@ int main() {
                 clrtoeol(); refresh();
             }
         }
-        else if (current_mode == 2 && ch == 'i') {
+        else if (current_mode == 3 && ch == 'i') {
             help_visible = 0;
             char path[256] = {0};
             if (prompt_input(inputwin, "Skin archive path: ", path, sizeof(path)) > 0) {
@@ -1508,12 +1962,12 @@ int main() {
             }
             refresh();
         }
-        else if (current_mode == 2 && ch == 'd') {
+        else if (current_mode == 3 && ch == 'd') {
             spawn_default_skin_async();
             set_last_msg("Resetting to default skin...");
             refresh();
         }
-        else if (current_mode == 2 && ch == 'a') {
+        else if (current_mode == 3 && ch == 'a') {
             if (skins_count > 0) {
                 char cmd[512]; snprintf(cmd, sizeof(cmd), "activate-skin %s", skins_list[skins_sel]);
                 spawn_cmd_async(cmd);
@@ -1523,7 +1977,7 @@ int main() {
             }
             refresh();
         }
-        else if (current_mode == 2 && ch == 'u') {
+        else if (current_mode == 3 && ch == 'u') {
             if (skins_count > 0) {
                 char cmd[512]; snprintf(cmd, sizeof(cmd), "deactivate-skin %s", skins_list[skins_sel]);
                 spawn_cmd_async(cmd);
@@ -1532,6 +1986,31 @@ int main() {
                 set_last_msg("No skins to deactivate");
             }
             refresh();
+        }
+        else if (current_mode == 3 && ch == 'x') {
+            // delete selected skin
+            if (skins_count > 0) {
+                help_visible = 0;
+                int a = 0;
+                size_t need = (size_t)snprintf(NULL, 0, "Delete skin %s? (y/N): ", skins_list[skins_sel]) + 1;
+                char *qprompt = malloc(need);
+                if (qprompt) {
+                    snprintf(qprompt, need, "Delete skin %s? (y/N): ", skins_list[skins_sel]);
+                    a = prompt_char(inputwin, qprompt);
+                    free(qprompt);
+                } else {
+                    char qbuf[128]; snprintf(qbuf, sizeof(qbuf), "Delete skin %.100s? (y/N): ", skins_list[skins_sel]);
+                    a = prompt_char(inputwin, qbuf);
+                }
+                if (a == 'y' || a == 'Y') {
+                    char cmd[512]; snprintf(cmd, sizeof(cmd), "remove-skin %s", skins_list[skins_sel]);
+                    spawn_cmd_async(cmd);
+                    set_last_msg("Removing skin...");
+                } else {
+                    set_last_msg("Cancelled");
+                }
+                refresh();
+            }
         }
         else if (current_mode == 0 && (ch == 's' || ch == 'm' || ch == 't')) {
             help_visible = 0;
@@ -1567,6 +2046,12 @@ int main() {
             if (a == 'y' || a == 'Y') allow_sudo = 1;
             interactive_start_daemon(allow_sudo);
             refresh();
+        }
+
+        else if (ch == 'R') {
+            // toggle raw status popup (handled after status refresh)
+            show_raw_status = 1;
+            continue;
         }
 
     }
