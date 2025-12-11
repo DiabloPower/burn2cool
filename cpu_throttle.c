@@ -1,9 +1,11 @@
+//#include <ftw.h> // not using nftw; keep code portable
 // (qsort comparator declared lower near zone_entry_t definition)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <libgen.h>
 #include <ctype.h>
@@ -26,8 +28,15 @@
 #define SOCKET_PATH "/tmp/cpu_throttle.sock"
 #define PID_FILE "/var/run/cpu_throttle.pid"
 #define CONFIG_FILE "/etc/cpu_throttle.conf"
+// Additional runtime config path for system use
+#define VARLIB_CONFIG "/var/lib/cpu_throttle/cpu_throttle.conf"
 #define DEFAULT_WEB_PORT 8086  // Intel 8086 tribute!
 #define DAEMON_VERSION "4.0"
+#define THROTTLE_START_OFFSET 30  // Start throttling 30°C below temp_max
+#define HYSTERESIS 3              // °C hysteresis
+#define POLL_TIMEOUT_MS 250       // Poll timeout in ms
+#define TEMP_READ_INTERVAL_MS 1000 // Temp read interval in ms
+#define MAX_LOG_SIZE (10 * 1024 * 1024) // 10 MB max log size
 
 // Logging levels
 #define LOGLEVEL_SILENT 0
@@ -45,6 +54,8 @@ int socket_fd = -1; // unix socket file descriptor
 int http_fd = -1; // HTTP socket file descriptor
 int web_port = 0; // HTTP port (0 = disabled, DEFAULT_WEB_PORT = 8086 when enabled)
 int log_level = LOGLEVEL_NORMAL; // default logging level
+char **cpu_freq_paths = NULL; // cached paths to CPU scaling_max_freq files
+int num_cpus = 0; // number of CPUs
 volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
 volatile sig_atomic_t should_restart = 0; // request restart by exec-ing self
 int thermal_zone = -1; // thermal zone number (-1 = auto-detect, prefer zone 0 if CPU)
@@ -60,6 +71,9 @@ const char *ASSETS_DIR = "assets";
 /* Active skin id (matches a subdirectory name under SKINS_DIR). Empty string
  * means use default embedded assets. */
 char active_skin[256] = "";
+
+// Forward declaration for helper normalizer
+static void normalize_excluded_types(char *out, size_t out_sz, const char *in);
 
 // Zone entry representation for JSON generation and sorting
 typedef struct zone_entry { int zone_num; char type[256]; int temp_c; } zone_entry_t;
@@ -143,6 +157,18 @@ void send_http_response_len(int client_fd, const char *status, const char *conte
 #define LOG_INFO(...) do { if (log_level >= LOGLEVEL_NORMAL) printf(__VA_ARGS__); } while(0)
 #define LOG_VERBOSE(...) do { if (log_level >= LOGLEVEL_VERBOSE) printf(__VA_ARGS__); } while(0)
 
+// Rotate log file if it exceeds MAX_LOG_SIZE
+static void rotate_log_file(const char *log_path) {
+    if (!log_path) return;
+    struct stat st;
+    if (stat(log_path, &st) == 0 && st.st_size > MAX_LOG_SIZE) {
+        char old_path[512];
+        snprintf(old_path, sizeof(old_path), "%s.old", log_path);
+        rename(log_path, old_path);
+        LOG_INFO("Log file rotated: %s -> %s\n", log_path, old_path);
+    }
+}
+
 void signal_handler(int sig) {
     (void)sig;
     should_exit = 1;
@@ -150,6 +176,70 @@ void signal_handler(int sig) {
 
 /* forward declaration for parse_skin_manifest used across the daemon */
 static void parse_skin_manifest(const char *manifest_path, char *out_id, size_t id_sz, char *out_name, size_t name_sz, int *allow_extra_js);
+
+// Helper: recursively remove a directory tree using nftw (safe, no shell required)
+static int remove_path_recursive(const char *path);
+
+// Implement a recursive directory removal function without nftw
+static int remove_dir_recursive_impl(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    struct dirent *entry;
+    int rv = 0;
+    while ((entry = readdir(d)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char child[1024]; snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        struct stat st; if (lstat(child, &st) != 0) { rv = -1; continue; }
+        if (S_ISDIR(st.st_mode)) {
+            if (remove_dir_recursive_impl(child) != 0) rv = -1;
+            if (rmdir(child) != 0) { LOG_ERROR("remove_dir_recursive_impl: rmdir failed %s: %s\n", child, strerror(errno)); rv = -1; }
+        } else {
+            if (unlink(child) != 0) { LOG_ERROR("remove_dir_recursive_impl: unlink failed %s: %s\n", child, strerror(errno)); rv = -1; }
+        }
+    }
+    closedir(d);
+    return rv;
+}
+
+static int remove_path_recursive(const char *path) {
+    struct stat st; if (lstat(path, &st) != 0) return -1;
+    if (S_ISDIR(st.st_mode)) {
+        // remove contents, then rmdir the dir itself
+        int r = remove_dir_recursive_impl(path);
+        if (r != 0) return -1;
+        if (rmdir(path) != 0) { LOG_ERROR("remove_path_recursive: rmdir failed %s: %s\n", path, strerror(errno)); return -1; }
+        return 0;
+    } else {
+        if (unlink(path) != 0) return -1; 
+        return 0;
+    }
+}
+
+/* spawn_and_waitvp and command_exists_in_path are provided by the TUI binary; daemon does not need them */
+
+// Helper: find a file named `name` in `dir` up to max_depth and return path
+static int find_file_in_dir(const char *dir, const char *name, int max_depth, char *out_path, size_t out_sz) {
+    if (!dir || !name || !out_path) return -1;
+    if (max_depth < 0) return -1;
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char p[1024]; snprintf(p, sizeof(p), "%s/%s", dir, entry->d_name);
+        struct stat st; if (stat(p, &st) != 0) continue;
+        if (S_ISREG(st.st_mode) && strcmp(entry->d_name, name) == 0) {
+            snprintf(out_path, out_sz, "%s", p);
+            closedir(d);
+            return 0;
+        }
+        if (S_ISDIR(st.st_mode) && max_depth > 0) {
+            if (find_file_in_dir(p, name, max_depth - 1, out_path, out_sz) == 0) { closedir(d); return 0; }
+        }
+    }
+    closedir(d);
+    return -1;
+}
 
 /* Read a file from disk and return allocated buffer (caller must free()) */
 static char *read_file_alloc(const char *path, size_t *out_len) {
@@ -163,6 +253,7 @@ static char *read_file_alloc(const char *path, size_t *out_len) {
     if (!buf) { fclose(fp); return NULL; }
     size_t r = fread(buf, 1, len, fp);
     fclose(fp);
+    if (r != (size_t)len) { free(buf); return NULL; }
     buf[r] = '\0';
     if (out_len) *out_len = r;
     return buf;
@@ -324,6 +415,9 @@ void cleanup_socket() {
     unlink(PID_FILE);
 }
 
+// Forward declarations
+static void cache_cpu_freq_paths(void);
+
 int write_pid_file() {
     FILE *fp = fopen(PID_FILE, "w");
     if (!fp) {
@@ -337,13 +431,7 @@ int write_pid_file() {
 
 char excluded_types_config[512] = "int3400,int3402,int3403,int3404,int3405,int3406,int3407";
 
-void load_config_file() {
-    FILE *fp = fopen(CONFIG_FILE, "r");
-    if (!fp) {
-        LOG_VERBOSE("No config file found at %s, using defaults\n", CONFIG_FILE);
-        return;
-    }
-    
+static void parse_config_fp(FILE *fp) {
     char line[256];
     int line_num = 0;
     while (fgets(line, sizeof(line), fp)) {
@@ -361,8 +449,13 @@ void load_config_file() {
             while (end > key && (*end == ' ' || *end == '\t')) *end-- = '\0';
             
             if (strcmp(key, "temp_max") == 0) {
-                temp_max = atoi(value);
-                LOG_VERBOSE("Config: temp_max = %d\n", temp_max);
+                int val = atoi(value);
+                if (val >= 50 && val <= 110) {
+                    temp_max = val;
+                    LOG_VERBOSE("Config: temp_max = %d\n", temp_max);
+                } else {
+                    LOG_VERBOSE("Config: temp_max %d out of range (50-110), using default 95\n", val);
+                }
             } else if (strcmp(key, "safe_min") == 0) {
                 safe_min = atoi(value);
                 LOG_VERBOSE("Config: safe_min = %d\n", safe_min);
@@ -374,14 +467,29 @@ void load_config_file() {
                 temp_path[sizeof(temp_path) - 1] = '\0';
                 LOG_VERBOSE("Config: sensor = %s\n", temp_path);
             } else if (strcmp(key, "thermal_zone") == 0) {
-                thermal_zone = atoi(value);
-                LOG_VERBOSE("Config: thermal_zone = %d\n", thermal_zone);
+                int val = atoi(value);
+                if (val >= -1 && val <= 100) {
+                    thermal_zone = val;
+                    LOG_VERBOSE("Config: thermal_zone = %d\n", thermal_zone);
+                } else {
+                    LOG_VERBOSE("Config: thermal_zone %d out of range (-1-100), using default -1\n", val);
+                }
             } else if (strcmp(key, "avg_temp") == 0) {
-                use_avg_temp = atoi(value);
-                LOG_VERBOSE("Config: avg_temp = %d\n", use_avg_temp);
+                int val = atoi(value);
+                if (val == 0 || val == 1) {
+                    use_avg_temp = val;
+                    LOG_VERBOSE("Config: avg_temp = %d\n", use_avg_temp);
+                } else {
+                    LOG_VERBOSE("Config: avg_temp %d invalid (0 or 1), using default 0\n", val);
+                }
             } else if (strcmp(key, "web_port") == 0) {
-                web_port = atoi(value);
-                LOG_VERBOSE("Config: web_port = %d\n", web_port);
+                int val = atoi(value);
+                if (val == 0 || (val >= 1024 && val <= 65535)) {
+                    web_port = val;
+                    LOG_VERBOSE("Config: web_port = %d\n", web_port);
+                } else {
+                    LOG_VERBOSE("Config: web_port %d out of range (0 or 1024-65535), using default 0\n", val);
+                }
             } else if (strcmp(key, "skin") == 0) {
                 snprintf(active_skin, sizeof(active_skin), "%s", value);
                 LOG_VERBOSE("Config: active skin = %s\n", active_skin);
@@ -393,14 +501,112 @@ void load_config_file() {
             }
         }
     }
-    fclose(fp);
 }
 
-void save_config_file() {
+void load_config_file() {
+    // Try to load system config first
+    FILE *fp = fopen(CONFIG_FILE, "r");
+    if (fp) {
+        parse_config_fp(fp);
+        fclose(fp);
+    } else {
+        LOG_VERBOSE("No config file found at %s, using defaults\n", CONFIG_FILE);
+    }
+
+    // Try runtime override (e.g., /var/lib)
+    FILE *fp2 = fopen(VARLIB_CONFIG, "r");
+    if (fp2) {
+        LOG_VERBOSE("Loading runtime config override: %s\n", VARLIB_CONFIG);
+        parse_config_fp(fp2);
+        fclose(fp2);
+    }
+
+    // Try loading user config override (~/.config/cpu_throttle.conf)
+    const char *home = getenv("HOME");
+    if (!home) {
+        struct passwd *pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : NULL;
+    }
+    if (home) {
+        char usercfg[512];
+        snprintf(usercfg, sizeof(usercfg), "%s/.config/cpu_throttle.conf", home);
+        FILE *fpu = fopen(usercfg, "r");
+        if (fpu) {
+            LOG_VERBOSE("Loading user config override: %s\n", usercfg);
+            parse_config_fp(fpu);
+            fclose(fpu);
+        }
+    }
+    // Normalize excluded_types after loading to ensure consistent format
+    if (excluded_types_config[0]) {
+        char normalized[512]; normalized[0] = '\0';
+        normalize_excluded_types(normalized, sizeof(normalized), excluded_types_config);
+        snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", normalized);
+    }
+}
+
+static char saved_config_path[512] = "";
+// Forward declaration
+static void normalize_excluded_types(char *out, size_t out_sz, const char *in);
+
+int save_config_file() {
     FILE *fp = fopen(CONFIG_FILE, "w");
     if (!fp) {
-        LOG_ERROR("Failed to open config file for writing: %s\n", CONFIG_FILE);
-        return;
+        LOG_ERROR("Failed to open config file for writing: %s, trying user config\n", CONFIG_FILE);
+        // If we're running as root, try to write to runtime /var/lib path as fallback
+        if (geteuid() == 0) {
+            // ensure /var/lib/cpu_throttle exists
+            mkdir("/var/lib/cpu_throttle", 0755);
+            FILE *fpvar = fopen(VARLIB_CONFIG, "w");
+            if (fpvar) {
+                fprintf(fpvar, "# CPU Throttle Configuration (runtime)\n");
+                fprintf(fpvar, "temp_max=%d\n", temp_max);
+                fprintf(fpvar, "safe_min=%d\n", safe_min);
+                fprintf(fpvar, "safe_max=%d\n", safe_max);
+                fprintf(fpvar, "sensor=%s\n", temp_path);
+                fprintf(fpvar, "thermal_zone=%d\n", thermal_zone);
+                fprintf(fpvar, "avg_temp=%d\n", use_avg_temp);
+                fprintf(fpvar, "web_port=%d\n", web_port);
+                fprintf(fpvar, "skin=%s\n", active_skin);
+                fprintf(fpvar, "excluded_types=%s\n", excluded_types_config);
+                fclose(fpvar);
+                LOG_INFO("Configuration saved to runtime config %s\n", VARLIB_CONFIG);
+                strncpy(saved_config_path, VARLIB_CONFIG, sizeof(saved_config_path)-1);
+                saved_config_path[sizeof(saved_config_path)-1] = '\0';
+                return 0;
+            }
+        }
+        // try to write user config instead
+        const char *home = getenv("HOME");
+        if (!home) {
+            struct passwd *pw = getpwuid(getuid());
+            home = pw ? pw->pw_dir : NULL;
+        }
+        if (home) {
+            char usercfg[512];
+            snprintf(usercfg, sizeof(usercfg), "%s/.config/cpu_throttle.conf", home);
+            fp = fopen(usercfg, "w");
+            if (!fp) {
+                LOG_ERROR("Failed to open user config for writing: %s\n", usercfg);
+                return -1;
+            }
+            fprintf(fp, "# CPU Throttle Configuration (user override)\n");
+            fprintf(fp, "temp_max=%d\n", temp_max);
+            fprintf(fp, "safe_min=%d\n", safe_min);
+            fprintf(fp, "safe_max=%d\n", safe_max);
+            fprintf(fp, "sensor=%s\n", temp_path);
+            fprintf(fp, "thermal_zone=%d\n", thermal_zone);
+            fprintf(fp, "avg_temp=%d\n", use_avg_temp);
+            fprintf(fp, "web_port=%d\n", web_port);
+            fprintf(fp, "skin=%s\n", active_skin);
+            fprintf(fp, "excluded_types=%s\n", excluded_types_config);
+            fclose(fp);
+            LOG_INFO("Configuration saved to user config %s\n", usercfg);
+            strncpy(saved_config_path, usercfg, sizeof(saved_config_path)-1);
+            saved_config_path[sizeof(saved_config_path)-1] = '\0';
+            return 0;
+        }
+        return -1;
     }
     
     fprintf(fp, "# CPU Throttle Configuration\n");
@@ -416,6 +622,9 @@ void save_config_file() {
     
     fclose(fp);
     LOG_INFO("Configuration saved to %s\n", CONFIG_FILE);
+    strncpy(saved_config_path, CONFIG_FILE, sizeof(saved_config_path)-1);
+    saved_config_path[sizeof(saved_config_path)-1] = '\0';
+    return 0;
 }
 
 // Check whether a skin directory exists under SKINS_DIR
@@ -439,13 +648,21 @@ static int skin_allows_extra_js(const char *id) {
     if (strncmp(q, "true", 4) == 0) return 1; else return 0;
 }
 
-/* Install a skin archive from a temporary path. This performs an insecure but
- * practical extraction using system utilities (tar/unzip) and copies the
- * extracted content into SKINS_DIR/<id>. The caller must enforce admin
- * constraints and check request authentication as needed. */
+/* Install a skin archive from a temporary path. This performs a secure extraction using
+ * execvp to avoid shell injection, and copies the extracted content into SKINS_DIR/<id>.
+ * The caller must enforce admin constraints and check request authentication as needed. */
 static int install_skin_archive_from_file(const char *archive_path, char *out_id, size_t id_sz) {
     if (!archive_path || !out_id) return -1;
     out_id[0] = '\0';
+
+    // Validate archive_path: only allow safe characters to prevent injection
+    for (const char *p = archive_path; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '/' && *p != '.' && *p != '-' && *p != '_') {
+            LOG_ERROR("Invalid characters in archive path: %s\n", archive_path);
+            return -1;
+        }
+        }
+
     char staging_template[] = "/tmp/burn2cool_skin_XXXXXX";
     char *staging = mkdtemp(staging_template);
     if (!staging) return -1;
@@ -457,43 +674,90 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (r >= 2 && sig[0] == 0x1F && sig[1] == 0x8B) use_tar = 1; // gzip
     if (r >= 2 && sig[0] == 'P' && sig[1] == 'K') use_zip = 1; // zip
 
-    char cmd[4096]; int rc = -1;
-    // Try common extraction patterns: gzip tar, plain tar, unzip
+    int rc = -1;
+    // Try common extraction patterns: gzip tar, plain tar, unzip using execvp for security
     if (use_tar) {
-        snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", archive_path, staging);
-        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
-        rc = system(cmd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("tar", "tar", "-xzf", archive_path, "-C", staging, NULL);
+            _exit(1);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        } else {
+            rc = -1;
+        }
         if (rc != 0) {
             // try plain tar (uncompressed)
-            snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s' 2>/dev/null", archive_path, staging);
-            LOG_VERBOSE("install_skin_archive_from_file: running fallback: %s\n", cmd);
-            rc = system(cmd);
+            pid_t pid2 = fork();
+            if (pid2 == 0) {
+                execlp("tar", "tar", "-xf", archive_path, "-C", staging, NULL);
+                _exit(1);
+            } else if (pid2 > 0) {
+                int status;
+                waitpid(pid2, &status, 0);
+                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            } else {
+                rc = -1;
+            }
         }
     } else if (use_zip) {
-        snprintf(cmd, sizeof(cmd), "unzip -q '%s' -d '%s' 2>/dev/null", archive_path, staging);
-        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
-        rc = system(cmd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("unzip", "unzip", "-q", archive_path, "-d", staging, NULL);
+            _exit(1);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        } else {
+            rc = -1;
+        }
     } else {
         // unknown: try gzip tar first, then plain tar, then unzip
-        snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", archive_path, staging);
-        LOG_VERBOSE("install_skin_archive_from_file: running: %s\n", cmd);
-        rc = system(cmd);
-        if (rc != 0) {
-            snprintf(cmd, sizeof(cmd), "tar -xf '%s' -C '%s' 2>/dev/null", archive_path, staging);
-            LOG_VERBOSE("install_skin_archive_from_file: running fallback: %s\n", cmd);
-            rc = system(cmd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("tar", "tar", "-xzf", archive_path, "-C", staging, NULL);
+            _exit(1);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        } else {
+            rc = -1;
         }
         if (rc != 0) {
-            snprintf(cmd, sizeof(cmd), "unzip -q '%s' -d '%s' 2>/dev/null", archive_path, staging);
-            LOG_VERBOSE("install_skin_archive_from_file: running fallback unzip: %s\n", cmd);
-            rc = system(cmd);
+            pid_t pid2 = fork();
+            if (pid2 == 0) {
+                execlp("tar", "tar", "-xf", archive_path, "-C", staging, NULL);
+                _exit(1);
+            } else if (pid2 > 0) {
+                int status;
+                waitpid(pid2, &status, 0);
+                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            } else {
+                rc = -1;
+            }
+        }
+        if (rc != 0) {
+            pid_t pid3 = fork();
+            if (pid3 == 0) {
+                execlp("unzip", "unzip", "-q", archive_path, "-d", staging, NULL);
+                _exit(1);
+            } else if (pid3 > 0) {
+                int status;
+                waitpid(pid3, &status, 0);
+                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            } else {
+                rc = -1;
+            }
         }
     }
-    if (rc != 0) { /* failed to extract */
+        if (rc != 0) { /* failed to extract */
         LOG_ERROR("install_skin_archive_from_file: failed to extract archive %s (rc=%d)\n", archive_path, rc);
         // cleanup
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging);
-        rc = system(cmd); (void)rc;
+            remove_path_recursive(staging);
         return -1;
     }
     // After extraction, check whether the staging area contains a single
@@ -509,8 +773,7 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
             int top_count = 0;
             char candidate[1024] = {0};
             while ((entry = readdir(sd)) != NULL) {
-                if (entry->d_name[0] == '.') continue;
-                // only count non-hidden entries
+                if (entry->d_name[0] == '.') continue; // only count non-hidden entries
                 top_count++;
                 if (top_count == 1) snprintf(candidate, sizeof(candidate), "%s", entry->d_name);
             }
@@ -530,11 +793,11 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
 
     // Find manifest
     char manifest_path[1024];
-    snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth 3 -type f -name manifest.json -print -quit", staging);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
-    if (!fgets(manifest_path, sizeof(manifest_path), fp)) { pclose(fp); snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
-    pclose(fp);
+    // Find manifest.json inside staging (no shell usage)
+    if (find_file_in_dir(staging, "manifest.json", 3, manifest_path, sizeof(manifest_path)) != 0) {
+        remove_path_recursive(staging);
+        return -1;
+    }
     // Trim newline
     char *nl = strchr(manifest_path, '\n'); if (nl) *nl = '\0';
     // Parse manifest
@@ -543,22 +806,84 @@ static int install_skin_archive_from_file(const char *archive_path, char *out_id
     if (!idbuf[0]) {
         // fallback to directory name containing manifest
         char *dir = strdup(manifest_path);
-        if (!dir) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
+        if (!dir) { remove_path_recursive(staging); return -1; }
         char *d = dirname(dir);
         if (d) snprintf(idbuf, sizeof(idbuf), "%s", basename(d));
         free(dir);
     }
-    if (!idbuf[0]) { snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc; return -1; }
+    if (!idbuf[0]) { remove_path_recursive(staging); return -1; }
     // Install to SKINS_DIR/<id>
     char dest[1024]; snprintf(dest, sizeof(dest), "%s/%s", SKINS_DIR, idbuf);
-    // Use quoting that allows glob expansion for rm -rf path/* while still being safe for paths with spaces
-    // Use the computed src_path that may have stripped a single top-level dir
-    int slen = snprintf(cmd, sizeof(cmd), "mkdir -p '%s' && rm -rf '%s'/* && cp -a '%s'/. '%s' && chown -R root:root '%s'", dest, dest, src_path, dest, dest);
-    LOG_VERBOSE("install_skin_archive_from_file: running install cmd: %s\n", cmd);
-    if (slen < 0 || slen >= (int)sizeof(cmd)) { LOG_ERROR("install_skin_archive_from_file: command truncated\n"); rc = -1; }
-    else rc = system(cmd);
-    // Cleanup
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", staging); rc = system(cmd); (void)rc;
+    // Perform installation steps securely using execvp
+    // Step 1: mkdir -p dest
+    pid_t pid_mkdir = fork();
+    if (pid_mkdir == 0) {
+        execlp("mkdir", "mkdir", "-p", dest, NULL);
+        _exit(1);
+    } else if (pid_mkdir > 0) {
+        int status;
+        waitpid(pid_mkdir, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            LOG_ERROR("install_skin_archive_from_file: mkdir failed\n");
+            rc = -1;
+        }
+    } else {
+        LOG_ERROR("install_skin_archive_from_file: fork failed\n");
+        rc = -1;
+    }
+    if (rc == 0) {
+        // Step 2: rm -rf dest/*
+        // Remove existing contents of the destination directory (no shell)
+        if (remove_path_recursive(dest) != 0) {
+            LOG_ERROR("install_skin_archive_from_file: rm failed for %s\n", dest);
+            rc = -1;
+        }
+    }
+    if (rc == 0) {
+        // Step 3: cp -a src_path/. dest
+        char src_dot[1024];
+        snprintf(src_dot, sizeof(src_dot), "%s/.", src_path);
+        pid_t pid_cp = fork();
+        if (pid_cp == 0) {
+            execlp("cp", "cp", "-a", src_dot, dest, NULL);
+            _exit(1);
+        } else if (pid_cp > 0) {
+            int status;
+            waitpid(pid_cp, &status, 0);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                LOG_ERROR("install_skin_archive_from_file: cp failed\n");
+                rc = -1;
+            }
+        } else {
+            LOG_ERROR("install_skin_archive_from_file: fork failed\n");
+            rc = -1;
+        }
+    }
+    if (rc == 0) {
+        // Step 4: chown -R root:root dest; only attempt when running as root
+        if (geteuid() == 0) {
+            pid_t pid_chown = fork();
+            if (pid_chown == 0) {
+                execlp("chown", "chown", "-R", "root:root", dest, NULL);
+                _exit(1);
+            } else if (pid_chown > 0) {
+                int status;
+                waitpid(pid_chown, &status, 0);
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    LOG_ERROR("install_skin_archive_from_file: chown failed\n");
+                    rc = -1;
+                }
+            } else {
+                LOG_ERROR("install_skin_archive_from_file: fork failed\n");
+                rc = -1;
+            }
+        } else {
+            // Running as non-root: skip chown step and keep ownership as-is
+            LOG_VERBOSE("install_skin_archive_from_file: non-root, skipping chown for %s\n", dest);
+        }
+    }
+    // Cleanup staging
+    remove_path_recursive(staging);
     if (rc != 0) { LOG_ERROR("install_skin_archive_from_file: failed to copy/perm dest %s (rc=%d)\n", dest, rc); return -1; }
     // Success
     snprintf(out_id, id_sz, "%s", idbuf);
@@ -696,30 +1021,112 @@ int read_freq_value(const char *path) {
 }
 
 void set_max_freq_all_cpus(int freq) {
-    DIR *dir = opendir(CPUFREQ_PATH);
-    struct dirent *entry;
-    if (!dir) return;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strncmp(entry->d_name, "cpu", 3) == 0 && isdigit(entry->d_name[3])) {
-            char path[512];
-            snprintf(path, sizeof(path),
-                     "%s/%s/cpufreq/scaling_max_freq", CPUFREQ_PATH, entry->d_name);
-            if (!dry_run) {
-                FILE *fp = fopen(path, "w");
-                if (fp) {
-                    fprintf(fp, "%d", freq);
-                    fclose(fp);
-                }
+    if (!cpu_freq_paths) {
+        cache_cpu_freq_paths();
+    }
+    for (int i = 0; i < num_cpus; i++) {
+        if (!dry_run) {
+            FILE *fp = fopen(cpu_freq_paths[i], "w");
+            if (fp) {
+                fprintf(fp, "%d", freq);
+                fclose(fp);
             }
         }
     }
-    closedir(dir);
 }
 
 int clamp(int val, int min, int max) {
     if (val < min) return min;
     if (val > max) return max;
     return val;
+}
+
+// Normalize excluded types CSV: trim whitespace, lowercase tokens, dedupe and rejoin
+static void normalize_excluded_types(char *out, size_t out_sz, const char *in) {
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!in || !in[0]) return;
+    char tmp[512]; strncpy(tmp, in, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+    char *tok = strtok(tmp, ",");
+    char seen[32][128]; int seen_count = 0;
+    int first = 1;
+    while (tok) {
+        // Trim leading/trailing whitespace
+        char *s = tok;
+        while (*s && isspace((unsigned char)*s)) s++;
+        char *e = s + strlen(s) - 1;
+        while (e >= s && isspace((unsigned char)*e)) { *e = '\0'; e--; }
+        if (*s) {
+            // lowercase
+            char lower[128]; size_t li = 0;
+            for (size_t i = 0; s[i] && li + 1 < sizeof(lower); ++i) lower[li++] = (char)tolower((unsigned char)s[i]);
+            lower[li] = '\0';
+            // dedupe
+            int dup = 0;
+            for (int i = 0; i < seen_count; ++i) { if (strcmp(seen[i], lower) == 0) { dup = 1; break; } }
+            if (!dup) {
+                if (seen_count < (int)(sizeof(seen)/sizeof(seen[0]))) strncpy(seen[seen_count++], lower, sizeof(seen[0])-1);
+                if (!first) {
+                    strncat(out, ",", out_sz - strlen(out) - 1);
+                }
+                strncat(out, lower, out_sz - strlen(out) - 1);
+                first = 0;
+            }
+        }
+        tok = strtok(NULL, ",");
+    }
+}
+
+// Cache CPU frequency paths to avoid repeated directory scans
+void cache_cpu_freq_paths() {
+    DIR *dir = opendir(CPUFREQ_PATH);
+    struct dirent *entry;
+    if (!dir) return;
+
+    // Count CPUs first
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "cpu", 3) == 0 && isdigit(entry->d_name[3])) {
+            count++;
+        }
+    }
+    rewinddir(dir);
+
+    // Allocate array
+    cpu_freq_paths = malloc(count * sizeof(char *));
+    if (!cpu_freq_paths) {
+        closedir(dir);
+        return;
+    }
+
+    // Store paths
+    int i = 0;
+    while ((entry = readdir(dir)) != NULL && i < count) {
+        if (strncmp(entry->d_name, "cpu", 3) == 0 && isdigit(entry->d_name[3])) {
+            char *path = malloc(512);
+            if (path) {
+                snprintf(path, 512, "%s/%s/cpufreq/scaling_max_freq", CPUFREQ_PATH, entry->d_name);
+                cpu_freq_paths[i++] = path;
+            }
+        }
+    }
+    num_cpus = i;
+    closedir(dir);
+}
+
+// Normalize excluded types CSV: trim whitespace, lowercase tokens, dedupe and rejoin
+static void normalize_excluded_types(char *out, size_t out_sz, const char *in);
+
+// Free cached CPU frequency paths
+void free_cpu_cache() {
+    if (cpu_freq_paths) {
+        for (int i = 0; i < num_cpus; i++) {
+            free(cpu_freq_paths[i]);
+        }
+        free(cpu_freq_paths);
+        cpu_freq_paths = NULL;
+        num_cpus = 0;
+    }
 }
 
 int setup_socket() {
@@ -863,6 +1270,13 @@ void send_http_response(int client_fd, const char *status, const char *content_t
 
 // JSON helper - build status response
 void build_status_json(char *buffer, size_t size) {
+    // generate username for current process
+    uid_t uid = geteuid();
+    char uname[64] = "";
+    struct passwd *pw = getpwuid(uid);
+    if (pw) strncpy(uname, pw->pw_name, sizeof(uname)-1);
+    else snprintf(uname, sizeof(uname), "uid:%d", (int)uid);
+
     snprintf(buffer, size,
              "{"
              "\"temperature\":%d,"
@@ -872,12 +1286,36 @@ void build_status_json(char *buffer, size_t size) {
              "\"temp_max\":%d,"
              "\"sensor\":\"%s\","
              "\"thermal_zone\":%d,"
-             "\"use_avg_temp\":%s"
+             "\"use_avg_temp\":%s,"
+             "\"running_user\":\"%s\""
              "}",
-             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false");
+             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false", uname);
 }
 
-// JSON helper - build zones response
+void build_metrics_json(char *buffer, size_t size) {
+    char *buf = buffer;
+    size_t remaining = size - 1;
+    int written = snprintf(buf, remaining, "{\"cpu_frequencies\":[");
+    buf += written;
+    remaining -= written;
+
+    for (int i = 0; i < num_cpus && remaining > 10; i++) {
+        char freq_path[512];
+        // Replace scaling_max_freq with scaling_cur_freq
+        snprintf(freq_path, sizeof(freq_path), "%s/cpufreq/scaling_cur_freq", strstr(cpu_freq_paths[i], "/cpufreq/scaling_max_freq") ? 
+                 (char*)cpu_freq_paths[i] : cpu_freq_paths[i]);
+        // Simpler: assume the path ends with scaling_max_freq, replace it
+        strcpy(freq_path, cpu_freq_paths[i]);
+        char *max_pos = strstr(freq_path, "scaling_max_freq");
+        if (max_pos) strcpy(max_pos, "scaling_cur_freq");
+        int freq = read_freq_value(freq_path);
+        written = snprintf(buf, remaining, "%d%s", freq, (i < num_cpus - 1) ? "," : "");
+        buf += written;
+        remaining -= written;
+    }
+    snprintf(buf, remaining, "]}");
+}
+
 void build_zones_json(char *buffer, size_t size) {
     DIR *dir = opendir("/sys/class/thermal");
     if (!dir) {
@@ -915,7 +1353,7 @@ void build_zones_json(char *buffer, size_t size) {
                 fclose(temp_fp);
             }
             int excluded = 0;
-            char lower_type[256]; strcpy(lower_type, type); for (char *p = lower_type; *p; ++p) *p = tolower(*p);
+            char lower_type[256]; snprintf(lower_type, sizeof(lower_type), "%s", type); for (char *p = lower_type; *p; ++p) *p = tolower(*p);
             if (is_excluded_thermal_type(lower_type)) excluded = 1;
             if (zcount < (int)(sizeof(zones) / sizeof(zones[0]))) {
                 zones[zcount].zone_num = zone_num;
@@ -1430,6 +1868,10 @@ void handle_http_request(int client_fd, const char *request) {
         build_status_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
     }
+    else if (strcmp(path, "/api/metrics") == 0 && strcmp(method, "GET") == 0) {
+        build_metrics_json(response, sizeof(response));
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
     else if (strcmp(path, "/api/limits") == 0 && strcmp(method, "GET") == 0) {
         build_limits_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
@@ -1542,8 +1984,8 @@ void handle_http_request(int client_fd, const char *request) {
                         send_http_response(client_fd, "404 Not Found", "application/json", "{\"ok\":false,\"error\":\"skin not found\"}");
                     } else {
                         if (strcmp(active_skin, id) == 0) { active_skin[0] = '\0'; save_config_file(); }
-                        char cmdrem[4096]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, id);
-                        rc = system(cmdrem); (void)rc;
+                        char dest[4096]; snprintf(dest, sizeof(dest), "%s/%s", SKINS_DIR, id);
+                        rc = remove_path_recursive(dest);
                         snprintf(response, sizeof(response), "{\"ok\":true,\"removed\":\"%s\"}", id);
                         send_http_response(client_fd, "200 OK", "application/json", response);
                     }
@@ -1821,38 +2263,57 @@ void handle_http_request(int client_fd, const char *request) {
                 char valbuf[512] = {0};
                 const char *vpos = strstr(body_start, "\"value\"");
                 if (vpos) {
-                    // find opening quote for the value string
-                    const char *value_start = strchr(vpos, '"');
-                    if (value_start) {
-                        // get to the second quote after the key name
-                        value_start = strchr(value_start + 1, '"');
-                        if (value_start) {
-                            const char *first_val_quote = strchr(value_start + 1, '"');
-                            if (first_val_quote) {
-                                const char *end_val_quote = strchr(first_val_quote + 1, '"');
-                                if (end_val_quote) {
-                                    size_t len = end_val_quote - first_val_quote - 1;
-                                    if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
-                                    snprintf(valbuf, sizeof(valbuf), "%.*s", (int)len, first_val_quote + 1);
-                                    valbuf[len] = 0;
-                                }
+                    // find the ':' after the key and then the opening quote
+                    const char *colon = strchr(vpos, ':');
+                    if (colon) {
+                        const char *p = colon + 1;
+                        while (*p && isspace((unsigned char)*p)) p++;
+                        if (*p == '"') {
+                            const char *start_q = p + 1;
+                            const char *end_q = strchr(start_q, '"');
+                            if (end_q) {
+                                size_t len = end_q - start_q;
+                                if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                                memcpy(valbuf, start_q, len);
+                                valbuf[len] = '\0';
                             }
+                        } else {
+                            // value not quoted - try to read until non-token char (comma/brace/whitespace)
+                            const char *start = p;
+                            while (*start && isspace((unsigned char)*start)) start++;
+                            const char *end = start;
+                            while (*end && !isspace((unsigned char)*end) && *end != ',' && *end != '}') end++;
+                            size_t len = end - start;
+                            if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                            memcpy(valbuf, start, len);
+                            valbuf[len] = '\0';
                         }
                     }
                 }
                 if (valbuf[0]) {
-                    for (char *p = valbuf; *p; ++p) *p = tolower(*p);
-                    snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", valbuf);
-                    save_config_file();
-                    snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"%s\"}", excluded_types_config);
+                    for (char *p = valbuf; *p; ++p) *p = tolower((unsigned char)*p);
+                    if (strcmp(valbuf, "none") == 0 || strcmp(valbuf, "clear") == 0) {
+                        excluded_types_config[0] = '\0';
+                        int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"\",\"saved\":true,\"saved_to\":\"%s\"}", saved_config_path);
+                        else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"\",\"saved\":false,\"message\":\"failed to write config\"}");
+                    } else {
+                        char normalized[512]; normalized[0] = '\0';
+                        normalize_excluded_types(normalized, sizeof(normalized), valbuf);
+                        snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", normalized);
+                        int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"%s\",\"saved\":true,\"saved_to\":\"%s\"}", excluded_types_config, saved_config_path);
+                        else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"excluded_types\":\"%s\",\"saved\":false,\"message\":\"failed to write config\"}", excluded_types_config);
+                    }
                 } else {
                     snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"invalid excluded-types payload\"}");
                 }
             }
             else if (strcmp(setting, "use-avg-temp") == 0) {
                 use_avg_temp = value ? 1 : 0;
-                save_config_file();
-                snprintf(response, sizeof(response), "{\"status\":\"ok\",\"use_avg_temp\":%s}", use_avg_temp ? "true" : "false");
+                int sr = save_config_file();
+                if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"use_avg_temp\":%s,\"saved\":true,\"saved_to\":\"%s\"}", use_avg_temp ? "true" : "false", saved_config_path);
+                else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"use_avg_temp\":%s,\"saved\":false,\"message\":\"failed to write config\"}", use_avg_temp ? "true" : "false");
             }
             else {
                 snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"unknown setting\"}");
@@ -1952,6 +2413,9 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
         }
         if (n > 0) {
             buffer[n] = '\0';
+            // Trim trailing whitespace/newlines so commands like "list-skins\n" match
+            size_t blen = strlen(buffer);
+            while (blen && isspace((unsigned char)buffer[blen-1])) { buffer[--blen] = '\0'; }
             LOG_INFO("Received command: '%s'\n", buffer);
 
             // If the incoming data looks like an HTTP request, pass it to the HTTP handler
@@ -2021,17 +2485,29 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                 }
                 else if (strcmp(cmd, "set-use-avg-temp") == 0 && sscanf(arg, "%d", &use_avg_temp) == 1) {
                     use_avg_temp = use_avg_temp ? 1 : 0;
-                    save_config_file();
-                    snprintf(response, sizeof(response), "OK: use_avg_temp set to %d\n", use_avg_temp);
+                    int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "OK: use_avg_temp set to %d (saved to %s)\n", use_avg_temp, saved_config_path);
+                        else snprintf(response, sizeof(response), "OK: use_avg_temp set to %d (not saved)\n", use_avg_temp);
                 }
                 else if (strcmp(cmd, "set-excluded-types") == 0) {
                     if (arg[0]) {
-                        // store lower-case list
-                        for (char *p = arg; *p; ++p) *p = tolower(*p);
-                        strncpy(excluded_types_config, arg, sizeof(excluded_types_config)-1);
-                        excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
-                        save_config_file();
-                        snprintf(response, sizeof(response), "OK: excluded types set to %.480s\n", excluded_types_config);
+                        // allow case-insensitive tokens, trim spaces and normalize csv
+                        char normalized[512]; normalized[0] = '\0';
+                        normalize_excluded_types(normalized, sizeof(normalized), arg);
+                        if (strcmp(normalized, "none") == 0 || strcmp(normalized, "clear") == 0) {
+                            excluded_types_config[0] = '\0';
+                            int sr = save_config_file();
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types cleared (saved to %s)\n", saved_config_path);
+                            else snprintf(response, sizeof(response), "OK: excluded types cleared (not saved)\n");
+                        } else if (normalized[0] == '\0') {
+                            snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
+                        } else {
+                            strncpy(excluded_types_config, normalized, sizeof(excluded_types_config)-1);
+                            excluded_types_config[sizeof(excluded_types_config)-1] = '\0';
+                            int sr = save_config_file();
+                            if (sr == 0) snprintf(response, sizeof(response), "OK: excluded types set to %.480s (saved to %s)\n", excluded_types_config, saved_config_path);
+                            else snprintf(response, sizeof(response), "OK: excluded types set to %.480s (not saved)\n", excluded_types_config);
+                        }
                     } else {
                         snprintf(response, sizeof(response), "ERROR: missing excluded types\n");
                     }
@@ -2064,6 +2540,10 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     } else {
                         snprintf(response, sizeof(response), "ERROR: not found\n");
                     }
+                }
+                else if (strcmp(cmd, "get-excluded-types") == 0) {
+                    // Return the raw CSV for excluded types (may be empty)
+                    snprintf(response, sizeof(response), "%s", excluded_types_config);
                 }
                 else if (strcmp(cmd, "write-profile-base64") == 0) {
                     // arg has "<name> <base64>"
@@ -2106,10 +2586,28 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         // allocate buffer to hold full payload
                         if (plen > 1024 * 1024 * 10) { // limit to 10MB
                             snprintf(response, sizeof(response), "ERROR: payload too large\n");
+                            // Drain the remaining payload bytes (client will still send them)
+                            size_t drained = (size_t)have;
+                            while (drained < plen) {
+                                ssize_t r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                if (r <= 0) {
+                                    break;
+                                }
+                                drained += (size_t)r;
+                            }
                         } else {
                             char *payload = malloc(plen + 1);
-                            if (!payload) {
+                                if (!payload) {
                                 snprintf(response, sizeof(response), "ERROR: malloc failed\n");
+                                // Drain the remaining payload to avoid client broken-pipe
+                                size_t drained = (size_t)have;
+                                while (drained < plen) {
+                                    ssize_t r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                    if (r <= 0) {
+                                        break;
+                                    }
+                                    drained += (size_t)r;
+                                }
                             } else {
                                 if (have > 0) memcpy(payload, buffer + body_start, have);
                                 // Read remaining bytes if any
@@ -2143,11 +2641,18 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         size_t have = total > body_start ? total - body_start : 0;
                         if (slen > 50 * 1024 * 1024) { snprintf(response, sizeof(response), "ERROR: payload too large\n"); }
                         else {
-                            // write raw payload to temp file
-                            char tmp_template[] = "/tmp/burn2cool_skin_XXXXXX.tar.gz";
+                            // write raw payload to temp file (mkstemp requires XXXXXX at end)
+                            char tmp_template[] = "/tmp/burn2cool_skin_XXXXXX";
                             int fd = mkstemp(tmp_template);
-                            if (fd < 0) { snprintf(response, sizeof(response), "ERROR: cannot create tmp file\n"); }
-                            else {
+                            if (fd < 0) {
+                                snprintf(response, sizeof(response), "ERROR: cannot create tmp file\n");
+                                size_t discarded = (size_t)have;
+                                while (discarded < slen) {
+                                    ssize_t r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                    if (r <= 0) break;
+                                    discarded += (size_t)r;
+                                }
+                            } else {
                                 // write already-read bytes
                                 size_t written = 0;
                                 if (have > 0) {
@@ -2157,7 +2662,10 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                                 }
                                 // read remaining
                                 while (written < slen) {
-                                    ssize_t r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                    ssize_t r;
+                                    do {
+                                        r = recv(client_fd, buffer, sizeof(buffer), 0);
+                                    } while (r == -1 && errno == EINTR);
                                     if (r <= 0) { close(fd); unlink(tmp_template); snprintf(response, sizeof(response), "ERROR: receive failed\n"); goto putskin_done; }
                                     ssize_t w = write(fd, buffer, r);
                                     if (w < 0) { close(fd); unlink(tmp_template); snprintf(response, sizeof(response), "ERROR: write failed\n"); goto putskin_done; }
@@ -2167,14 +2675,17 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                                 // install
                                 char installed_id[256] = {0};
                                 if (install_skin_archive_from_file(tmp_template, installed_id, sizeof(installed_id)) != 0) {
+                                    LOG_ERROR("put-skin: install_skin_archive_from_file failed for %s\n", tmp_template);
                                     snprintf(response, sizeof(response), "ERROR: install failed\n");
                                 } else {
+                                    // Return installed id in textual form so cli can parse it
                                     snprintf(response, sizeof(response), "OK: installed %s\n", installed_id);
                                 }
                                 unlink(tmp_template);
                             }
                         }
                     }
+                    
                 putskin_done: ;
                 }
                 else if (strcmp(cmd, "status") == 0) {
@@ -2275,8 +2786,8 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                     } else {
                         // If this skin is active, clear it
                         if (strcmp(active_skin, arg) == 0) { active_skin[0] = '\0'; save_config_file(); }
-                        char cmdrem[4096]; snprintf(cmdrem, sizeof(cmdrem), "rm -rf '%s/%s'", SKINS_DIR, arg);
-                        rc = system(cmdrem); (void)rc;
+                        char dest[4096]; snprintf(dest, sizeof(dest), "%s/%s", SKINS_DIR, arg);
+                        rc = remove_path_recursive(dest);
                         snprintf(response, sizeof(response), "OK: skin %s removed\n", arg);
                     }
                 }
@@ -2328,7 +2839,7 @@ int read_avg_cpu_temp() {
                 if (fgets(type, sizeof(type), fp)) {
                         type[strcspn(type, "\n")] = 0;
                     char lower_type[256];
-                    strcpy(lower_type, type);
+                    snprintf(lower_type, sizeof(lower_type), "%s", type);
                     for (char *p = lower_type; *p; ++p) *p = tolower(*p);
                         if (strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
                             strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg")) {
@@ -2386,7 +2897,7 @@ int detect_cpu_thermal_zone() {
                 if (fgets(type, sizeof(type), fp)) {
                     type[strcspn(type, "\n")] = 0;
                     char lower_type[256];
-                    strcpy(lower_type, type);
+                    snprintf(lower_type, sizeof(lower_type), "%s", type);
                     for (char *p = lower_type; *p; ++p) *p = tolower(*p);
                     int is_cpu = strstr(lower_type, "cpu") || strstr(lower_type, "core") || strstr(lower_type, "x86") ||
                                  strstr(lower_type, "intel") || strstr(lower_type, "amd") || strstr(lower_type, "pkg");
@@ -2443,6 +2954,7 @@ void print_help(const char *name) {
     printf("  --verbose            Enable verbose logging\n");
     printf("  --quiet              Quiet mode (errors only)\n");
     printf("  --silent             Silent mode (no output)\n");
+    printf("  --test               Run unit tests and exit\n");
     printf("  --help               Show this help message\n");
     printf("\nConfig file: %s (optional)\n", CONFIG_FILE);
     printf("Supported keys: temp_max, safe_min, safe_max, sensor, thermal_zone, avg_temp, web_port\n");
@@ -2451,7 +2963,44 @@ void print_help(const char *name) {
     printf("  Use --web-port <port> for custom port (1024-65535)\n");
 }
 
+int run_tests() {
+    printf("Running unit tests...\n");
+
+    // Test base64_decode
+    const char *b64_input = "SGVsbG8gV29ybGQ="; // "Hello World"
+    unsigned char decoded[20];
+    size_t dlen;
+    base64_decode(b64_input, decoded, &dlen);
+    decoded[dlen] = '\0';
+    if (strcmp((char*)decoded, "Hello World") == 0) {
+        printf("✓ base64_decode test passed\n");
+    } else {
+        printf("✗ base64_decode test failed: got '%s'\n", decoded);
+        return 1;
+    }
+
+    // Test clamp
+    if (clamp(5, 0, 10) == 5 && clamp(-1, 0, 10) == 0 && clamp(15, 0, 10) == 10) {
+        printf("✓ clamp test passed\n");
+    } else {
+        printf("✗ clamp test failed\n");
+        return 1;
+    }
+
+    // Test read_temp (only if sensor exists)
+    int temp = read_temp();
+    if (temp >= 0) {
+        printf("✓ read_temp test passed (temp: %d°C)\n", temp);
+    } else {
+        printf("⚠ read_temp test skipped (no sensor available)\n");
+    }
+
+    printf("All tests completed.\n");
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
+    char *log_path = NULL;
     saved_argv = argv; // keep argv for potential execv on restart
     // Load config file first (CLI args will override)
     load_config_file();
@@ -2462,6 +3011,7 @@ int main(int argc, char *argv[]) {
             dry_run = 1;
         } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
             logfile = fopen(argv[++i], "a");
+            log_path = argv[i];
             if (!logfile) {
                 fprintf(stderr, "Error: Cannot open log file: %s\n", argv[i]);
                 return 1;
@@ -2505,6 +3055,8 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
             return 0;
+        } else if (strcmp(argv[i], "--test") == 0) {
+            return run_tests();
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_help(argv[0]);
@@ -2583,7 +3135,7 @@ int main(int argc, char *argv[]) {
     // Use poll() to wait for incoming connections and run periodic tasks.
     struct timeval last_temp_tv;
     gettimeofday(&last_temp_tv, NULL);
-    const int poll_timeout_ms = 250; // wake up periodically to handle tasks
+    const int poll_timeout_ms = POLL_TIMEOUT_MS; // wake up periodically to handle tasks
 
     while (!should_exit) {
         struct pollfd pfds[2];
@@ -2616,7 +3168,7 @@ int main(int argc, char *argv[]) {
         struct timeval now;
         gettimeofday(&now, NULL);
         long elapsed_ms = (now.tv_sec - last_temp_tv.tv_sec) * 1000 + (now.tv_usec - last_temp_tv.tv_usec) / 1000;
-        if (elapsed_ms >= 1000) {
+        if (elapsed_ms >= TEMP_READ_INTERVAL_MS) {
             // Recalculate max_freq based on safe_max
             int max_freq = max_freq_limit;
             if (safe_max > 0 && safe_max < max_freq) max_freq = safe_max;
@@ -2630,8 +3182,8 @@ int main(int argc, char *argv[]) {
             current_temp = temp;
 
             int new_freq = max_freq;
-            int throttle_start = temp_max - 30; // Start throttling 30°C below temp_max for gentler curve
-            int hysteresis = 3; // °C hysteresis to prevent oscillations
+            int throttle_start = temp_max - THROTTLE_START_OFFSET; // Start throttling THROTTLE_START_OFFSET°C below temp_max for gentler curve
+            int hysteresis = HYSTERESIS; // °C hysteresis to prevent oscillations
 
             // Calculate target frequency
             int target_freq = max_freq;
@@ -2659,6 +3211,7 @@ int main(int argc, char *argv[]) {
             current_freq = new_freq;
             if (abs(new_freq - last_freq) > (max_freq - min_freq) / 10) {
                 set_max_freq_all_cpus(new_freq);
+                rotate_log_file(log_path);
                 LOG_INFO("Temp: %d°C → MaxFreq: %d kHz%s\n", temp, new_freq, dry_run ? " [DRY-RUN]" : "");
                 if (logfile) {
                     fprintf(logfile, "Temp: %d°C → MaxFreq: %d kHz\n", temp, new_freq);
@@ -2683,5 +3236,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     LOG_INFO("Shutting down gracefully...\n");
+    free_cpu_cache();
     return 0;
 }

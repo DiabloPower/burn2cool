@@ -13,18 +13,45 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <ctype.h>
+
+#include <sys/wait.h>
+
 #define SOCKET_PATH "/tmp/cpu_throttle.sock"
+
+// Constants for buffer sizes and limits
+#define CMD_BUFFER_SIZE 512
+#define INITIAL_RESPONSE_CAPACITY 32768
+#define RESPONSE_EXPANSION_THRESHOLD 4096
+#define MAX_PROFILE_NAME_LENGTH 64
+#define TEMP_FILE_TEMPLATE "/tmp/cpu_throttle_ctl_json_XXXXXX"
+#define SKIN_HEADER_BUFFER_SIZE 512
+#define SKIN_DATA_BUFFER_SIZE 4096
+#define SKIN_RESPONSE_BUFFER_SIZE 1024
+#define GENERAL_CMD_BUFFER_SIZE 256
+
+static int verbose = 0;
 
 char* get_profile_dir() {
     return "/var/lib/cpu_throttle/profiles";
 }
 
+// Validate profile name: alphanumeric, underscore, dash, no path separators
+static int validate_profile_name(const char *name) {
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    if (len > MAX_PROFILE_NAME_LENGTH) return 0; // reasonable max length
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!isalnum(c) && c != '_' && c != '-') return 0;
+    }
+    return 1;
+}
+
 static int has_local_cmd(const char *name) {
-    char buf[128];
-    int rc;
-    snprintf(buf, sizeof(buf), "command -v %s >/dev/null 2>&1", name);
-    rc = system(buf);
-    return rc == 0;
+    char path[256];
+    snprintf(path, sizeof(path), "/usr/bin/%s", name);
+    return access(path, X_OK) == 0;
 }
 
 // Attempt to pretty-print JSON using common tools (jq, python3 json.tool).
@@ -143,6 +170,7 @@ void print_help(const char *name) {
 }
 
 int send_command(const char *cmd) {
+    if (verbose) fprintf(stderr, "DEBUG: Connecting to socket %s\n", SOCKET_PATH);
     // Ensure SIGPIPE doesn't crash the CLI if the daemon closes the socket
     signal(SIGPIPE, SIG_IGN);
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -150,6 +178,7 @@ int send_command(const char *cmd) {
         perror("socket");
         return -1;
     }
+    if (verbose) fprintf(stderr, "DEBUG: Socket created, fd=%d\n", sock_fd);
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -162,53 +191,74 @@ int send_command(const char *cmd) {
         close(sock_fd);
         return -1;
     }
+    if (verbose) fprintf(stderr, "DEBUG: Connected to daemon\n");
 
-    printf("Connected to socket\n");
 
-    char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    char cmd_nl[CMD_BUFFER_SIZE]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (verbose) fprintf(stderr, "DEBUG: Sending command: %s", cmd_nl);
     if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) { perror("send"); close(sock_fd); return -1; }
 
-    printf("Sent command: %s\n", cmd);
 
     char response[512];
-    printf("Waiting for response...\n");
     ssize_t n = recv(sock_fd, response, sizeof(response) - 1, 0);
-    printf("recv returned %zd\n", n);
     if (n > 0) {
         response[n] = '\0';
-        printf("Received: '%s'\n", response);
         printf("%s", response);
+        if (verbose) fprintf(stderr, "DEBUG: Received response (%zd bytes)\n", n);
     } else if (n == 0) {
         printf("Connection closed by server\n");
+        if (verbose) fprintf(stderr, "DEBUG: Connection closed by server\n");
     } else {
         perror("recv");
     }
 
     close(sock_fd);
+    if (verbose) fprintf(stderr, "DEBUG: Socket closed\n");
     return 0;
 }
 
 // Send a command and return the response string (malloc'ed, caller frees).
 char *send_command_get_response(const char *cmd) {
+    if (verbose) fprintf(stderr, "DEBUG: Connecting to socket %s for response\n", SOCKET_PATH);
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock_fd < 0) return NULL;
+    if (sock_fd < 0) {
+        if (verbose) perror("DEBUG: socket failed");
+        return NULL;
+    }
+    if (verbose) fprintf(stderr, "DEBUG: Socket created, fd=%d\n", sock_fd);
     struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
-    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(sock_fd); return NULL; }
-    char cmd_nl[512]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
-    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) { close(sock_fd); return NULL; }
+    memset(&addr, 0, sizeof(addr)); addr.sun_family = AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (verbose) perror("DEBUG: connect failed");
+        close(sock_fd); return NULL;
+    }
+    if (verbose) fprintf(stderr, "DEBUG: Connected to daemon\n");
+    char cmd_nl[CMD_BUFFER_SIZE]; snprintf(cmd_nl, sizeof(cmd_nl), "%s\n", cmd);
+    if (verbose) fprintf(stderr, "DEBUG: Sending command: %s", cmd_nl);
+    if (send_all(sock_fd, cmd_nl, strlen(cmd_nl)) != 0) {
+        if (verbose) perror("DEBUG: send failed");
+        close(sock_fd); return NULL;
+    }
     // Read up to some reasonable max (e.g., 32KB)
-    size_t cap = 32768; char *buf = malloc(cap);
-    if (!buf) { close(sock_fd); return NULL; }
+    size_t cap = INITIAL_RESPONSE_CAPACITY; char *buf = malloc(cap);
+    if (!buf) {
+        if (verbose) fprintf(stderr, "DEBUG: malloc failed\n");
+        close(sock_fd); return NULL;
+    }
     size_t total = 0;
     while (1) {
         ssize_t n = recv(sock_fd, buf + total, (ssize_t)cap - 1 - total, 0);
         if (n > 0) {
             total += (size_t)n;
-            if (cap - total < 4096) {
+            if (verbose) fprintf(stderr, "DEBUG: Received %zd bytes, total %zu\n", n, total);
+            if (cap - total < RESPONSE_EXPANSION_THRESHOLD) {
                 size_t ncap = cap * 2;
+                if (verbose) fprintf(stderr, "DEBUG: Expanding buffer to %zu\n", ncap);
                 char *nb = realloc(buf, ncap);
-                if (!nb) break;
+                if (!nb) {
+                    if (verbose) fprintf(stderr, "DEBUG: realloc failed\n");
+                    free(buf); close(sock_fd); return NULL;
+                }
                 buf = nb; cap = ncap;
             }
             continue;
@@ -217,6 +267,7 @@ char *send_command_get_response(const char *cmd) {
     }
     ssize_t n = (ssize_t)total;
     close(sock_fd);
+    if (verbose) fprintf(stderr, "DEBUG: Socket closed, total received %zd bytes\n", n);
     if (n <= 0) { free(buf); return NULL; }
     buf[n] = '\0';
     return buf;
@@ -235,7 +286,7 @@ void save_profile(const char *profile_name) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
 
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Error: Cannot connect to daemon\n");
@@ -301,7 +352,7 @@ void list_profiles() {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
 
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Error: Cannot connect to cpu_throttle daemon.\n");
@@ -355,7 +406,7 @@ void get_profile(const char *profile_name) {
     struct sockaddr_un addr;
     memset(&addr,0,sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); return; }
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "get-profile %s", profile_name);
@@ -372,11 +423,13 @@ void put_profile(const char *profile_name, const char *file_path) {
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
+    const long PROFILE_MAX_BYTES = 10L * 1024L * 1024L; // 10MB
+    if (fsize > PROFILE_MAX_BYTES) { fprintf(stderr, "Error: profile file too large (>%ld bytes)\n", PROFILE_MAX_BYTES); fclose(fp); return; }
 
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) { perror("socket"); fclose(fp); return; }
     struct sockaddr_un addr;
-    memset(&addr,0,sizeof(addr)); addr.sun_family = AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+    memset(&addr,0,sizeof(addr)); addr.sun_family = AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { fprintf(stderr, "Error: Cannot connect to daemon\n"); close(sock_fd); fclose(fp); return; }
 
     // Send header: put-profile <name> <len>\n
@@ -422,10 +475,26 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    if (verbose) fprintf(stderr, "DEBUG: argc=%d, argv[1]=%s\n", argc, argv[1]);
+    fflush(stderr);
+
+    // Check for verbose flag
+    if (argc >= 2 && (strcmp(argv[1], "--verbose") == 0 || strcmp(argv[1], "-v") == 0)) {
+        verbose = 1;
+        // Shift arguments
+        argc--;
+        argv++;
+        if (verbose) fprintf(stderr, "DEBUG: verbose enabled, new argc=%d, argv[1]=%s\n", argc, argv[1]);
+    }
+
     // Handle profile commands locally
     if (strcmp(argv[1], "save-profile") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Error: Profile name required\n");
+            return 1;
+        }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
             return 1;
         }
         save_profile(argv[2]);
@@ -435,6 +504,10 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Profile name required\n");
             return 1;
         }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         load_profile(argv[2]);
         return 0;
     } else if (strcmp(argv[1], "list-profiles") == 0) {
@@ -442,7 +515,12 @@ int main(int argc, char *argv[]) {
         if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
             char *resp = send_command_get_response("list-profiles json");
             if (!resp) { fprintf(stderr, "Error: failed to query profiles\n"); return 1; }
-            printf("%s\n", resp); free(resp); return 0;
+            if (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) {
+                print_json_pretty_or_raw(resp);
+            } else {
+                printf("%s\n", resp);
+            }
+            free(resp); return 0;
         }
         list_profiles();
         return 0;
@@ -451,24 +529,44 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Profile name required\n");
             return 1;
         }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         delete_profile(argv[2]);
         return 0;
     }
     else if (strcmp(argv[1], "get-profile") == 0) {
         if (argc < 3) { fprintf(stderr, "Error: Profile name required\n"); return 1; }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         get_profile(argv[2]);
         return 0;
     }
     else if (strcmp(argv[1], "put-profile") == 0) {
         if (argc < 4) { fprintf(stderr, "Error: Profile name and file required\n"); return 1; }
+        if (!validate_profile_name(argv[2])) {
+            fprintf(stderr, "Error: Invalid profile name. Use only alphanumeric, underscore, and dash characters.\n");
+            return 1;
+        }
         put_profile(argv[2], argv[3]);
         return 0;
     }
     else if (strcmp(argv[1], "start") == 0) {
         // Try to start via systemctl first
-        if (system("systemctl start cpu_throttle.service") == 0) {
-            printf("Started cpu_throttle via systemctl\n");
-            return 0;
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("systemctl", "systemctl", "start", "cpu_throttle.service", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                printf("Started cpu_throttle via systemctl\n");
+                return 0;
+            }
         }
         // Fallback: attempt to launch in background
         if (fork() == 0) {
@@ -499,13 +597,15 @@ int main(int argc, char *argv[]) {
                     if (!fp) { fprintf(stderr, "Error: cannot open file %s\n", argv[3]); return 1; }
                     fseek(fp, 0, SEEK_END); long fsize = ftell(fp); fseek(fp, 0, SEEK_SET);
                     if (fsize <= 0) { fprintf(stderr, "Error: empty file\n"); fclose(fp); return 1; }
+                    const long SKIN_MAX_BYTES = 50L * 1024L * 1024L; // 50MB
+                    if (fsize > SKIN_MAX_BYTES) { fprintf(stderr, "Error: archive too large (>%ld bytes)\n", SKIN_MAX_BYTES); fclose(fp); return 1; }
                     // compose header: put-skin <basename> <len>\n
                     char *base = strrchr(argv[3], '/'); if (base) base++; else base = argv[3];
                     char header[512]; int hlen = snprintf(header, sizeof(header), "put-skin %s %ld\n", base, (long)fsize);
                     if (hlen < 0 || hlen >= (int)sizeof(header)) { fprintf(stderr, "Error: header too large\n"); fclose(fp); return 1; }
                     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
                     if (sock_fd < 0) { perror("socket"); fclose(fp); return 1; }
-                    struct sockaddr_un addr; memset(&addr,0,sizeof(addr)); addr.sun_family=AF_UNIX; strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path)-1);
+                    struct sockaddr_un addr; memset(&addr,0,sizeof(addr)); addr.sun_family=AF_UNIX; snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", SOCKET_PATH);
                     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("connect"); close(sock_fd); fclose(fp); return 1; }
                     if (send(sock_fd, header, hlen, 0) != hlen) { perror("send header"); close(sock_fd); fclose(fp); return 1; }
                     char buf[4096]; size_t remaining = (size_t)fsize; while (remaining) {

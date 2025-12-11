@@ -23,6 +23,7 @@
         <div class='status-row'><div class='label'>Frequency</div><div class='value' id='freq'>--</div></div>
         <div class='status-row'><div class='label'>Thermal Zone</div><div class='value' id='zone'>--</div></div>
         <div class='status-row'><div class='label'>Use Avg Temp</div><div class='value' id='avg'>--</div></div>
+        <div class='status-row'><div class='label'>Daemon user</div><div class='value' id='daemon_user'>--</div></div>
       </div>
       </div>
     </div>
@@ -187,6 +188,7 @@
           const tz = document.getElementById('thermalZoneSelect');
           if(tz && document.activeElement !== tz) tz.value = d.thermal_zone;
           useAvgTemp = d.use_avg_temp;
+          const du = document.getElementById('daemon_user'); if (du) du.textContent = d.running_user || '--';
           // Update avg button label to reflect current state
           const avgBtn = document.getElementById('avgBtn'); if(avgBtn) { avgBtn.textContent = useAvgTemp ? 'Disable Avg Temp' : 'Enable Avg Temp'; if(useAvgTemp) avgBtn.classList.add('btn-enabled'); else avgBtn.classList.remove('btn-enabled'); }
         }).catch(()=>{});
@@ -201,12 +203,25 @@
         }).catch(()=>{});
       }
             function setSetting(name,val){
-        console.log("Setting " + name + " to " + val);
-        fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: parseInt(val)})}).then(response => response.text().then(text => { console.log("Response: " + text); update(); })).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
-      }
+              console.log("Setting " + name + " to " + val);
+              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: parseInt(val)})}).then(response => response.json()).then(j => {
+                console.log("Response: ", j);
+                if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
+                else if (j && j.status === 'ok') showToast('Updated', 'success');
+                else showToast('Update not saved', 'error');
+                update();
+              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
+            }
             function setSettingText(name,val){
+              val = val ? val.trim() : val;
               console.log("Setting string " + name + " to " + val);
-              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: val})}).then(response => response.text().then(text => { console.log("Response: " + text); update(); })).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
+              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: val})}).then(response => response.json()).then(j => {
+                console.log("Response: ", j);
+                if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
+                else if (j && j.status === 'ok') showToast('Updated', 'success');
+                else showToast('Update not saved', 'error');
+                update();
+              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
             }
       function fetchDaemonVersion(){
         fetch('/api/daemon/version').then(r=>r.json()).then(j=>{ const v = j && j.version ? j.version : null; const el = document.querySelector('.topbar .version'); if(el && v) el.textContent = 'v'+v; }).catch(()=>{});

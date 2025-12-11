@@ -53,4 +53,8 @@ include/styles_css.h
 include/favicon_ico.h
 include/assets_generated.h
 
+# NFS temporary files
 *.nfs*
+
+# TODOs
+*TODO*.md
