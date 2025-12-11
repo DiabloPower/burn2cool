@@ -1278,6 +1278,54 @@ stop_daemon() {
 
 stop_daemon
 
+# Remove legacy binaries if present
+cleanup_legacy_files() {
+  log "Checking for legacy files from previous versions..."
+  
+  # Legacy binaries (various naming schemes from v1)
+  local legacy_binaries=(
+    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
+    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
+    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
+    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
+    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
+    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
+  )
+  
+  for binary in "${legacy_binaries[@]}"; do
+    if [ -f "$binary" ]; then
+      log "Removing legacy binary: $binary"
+      sudo rm -f "$binary"
+    fi
+  done
+  
+  # Legacy systemd services
+  local legacy_services=(
+    "cpu-throttle"      # v1 service with dash
+    "cpu_throttle"      # v1 service with underscore
+  )
+  
+  for service in "${legacy_services[@]}"; do
+    # Stop and disable service first, then remove files
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      log "Stopping legacy systemd service: $service"
+      sudo systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
+      log "Disabling legacy systemd service: $service"
+      sudo systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+    # Only remove service file after service is stopped and disabled
+    if [ -f "/etc/systemd/system/${service}.service" ]; then
+      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
+      sudo rm -f "/etc/systemd/system/${service}.service"
+    fi
+  done
+  
+  # Reload systemd to pick up changes
+  sudo systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
 cleanup_legacy_files
 
 # =========================
@@ -1406,54 +1454,6 @@ fi
 if [ "${WANT_DAEMON:-0}" -eq 1 ] && [ "$BIN_INSTALLED" -eq 0 ]; then
   warn "Core daemon ($BINARY_NAME) was not found in staged artifacts. Continuing anyway."
 fi
-
-# Remove legacy binaries if present
-cleanup_legacy_files() {
-  log "Checking for legacy files from previous versions..."
-  
-  # Legacy binaries (various naming schemes from v1)
-  local legacy_binaries=(
-    "/usr/local/bin/cpu-throttle"      # v1 daemon (original)
-    "/usr/local/bin/cpu_throttle"      # v1 daemon with underscores
-    "/usr/local/bin/cpu_throttle-ctl"  # v1 ctl with underscore
-    "/usr/local/bin/cpu-throttle-ctl"  # v1 ctl with dash
-    "/usr/local/bin/cpu_throttle_tui"  # v1 tui with underscores
-    "/usr/local/bin/cpu-throttle-tui"  # v1 tui with dashes
-  )
-  
-  for binary in "${legacy_binaries[@]}"; do
-    if [ -f "$binary" ]; then
-      log "Removing legacy binary: $binary"
-      sudo rm -f "$binary"
-    fi
-  done
-  
-  # Legacy systemd services
-  local legacy_services=(
-    "cpu-throttle"      # v1 service with dash
-    "cpu_throttle"      # v1 service with underscore
-  )
-  
-  for service in "${legacy_services[@]}"; do
-    # Stop and disable service first, then remove files
-    if systemctl is-active --quiet "$service" 2>/dev/null; then
-      log "Stopping legacy systemd service: $service"
-      sudo systemctl stop "$service" >/dev/null 2>&1 || true
-    fi
-    if systemctl is-enabled --quiet "$service" 2>/dev/null; then
-      log "Disabling legacy systemd service: $service"
-      sudo systemctl disable "$service" >/dev/null 2>&1 || true
-    fi
-    # Only remove service file after service is stopped and disabled
-    if [ -f "/etc/systemd/system/${service}.service" ]; then
-      log "Removing legacy systemd service file: /etc/systemd/system/${service}.service"
-      sudo rm -f "/etc/systemd/system/${service}.service"
-    fi
-  done
-  
-  # Reload systemd to pick up changes
-  sudo systemctl daemon-reload >/dev/null 2>&1 || true
-}
 
 # =========================
 # Port selection and web API enablement
