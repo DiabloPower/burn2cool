@@ -2849,7 +2849,7 @@ int detect_cpu_thermal_zone() {
         return 0;
     }
     struct dirent *entry;
-    int best_zone = 0; // Default to zone 0
+    int best_zone = -1; // No default, find CPU zone first
     int max_temp = -1;
     int zone0_temp = -1;
     while ((entry = readdir(dir)) != NULL) {
@@ -2891,13 +2891,14 @@ int detect_cpu_thermal_zone() {
         }
     }
     closedir(dir);
-    // If no CPU zone found or zone 0 has reasonable temp, prefer zone 0
-    if (best_zone == 0 || (zone0_temp > 0 && zone0_temp < 100)) {
-        LOG_VERBOSE("Using thermal zone 0 (temp: %d°C)\n", zone0_temp);
+    // Prefer CPU zones, fallback to zone 0 if no CPU zone found
+    if (best_zone != -1) {
+        LOG_VERBOSE("Auto-detected CPU thermal zone %d (temp: %d°C)\n", best_zone, max_temp);
+        return best_zone;
+    } else {
+        LOG_VERBOSE("No CPU thermal zone found, using zone 0 as fallback (temp: %d°C)\n", zone0_temp);
         return 0;
     }
-    LOG_VERBOSE("Auto-detected CPU thermal zone %d (temp: %d°C)\n", best_zone, max_temp);
-    return best_zone;
 }
 
 void set_thermal_zone_path(int zone) {
