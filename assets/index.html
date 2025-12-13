@@ -209,6 +209,11 @@
                 if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
                 else if (j && j.status === 'ok') showToast('Updated', 'success');
                 else showToast('Update not saved', 'error');
+                // Special handling for thermal-zone to update the select immediately
+                if (name === 'thermal-zone' && j && j.thermal_zone !== undefined) {
+                  const tz = document.getElementById('thermalZoneSelect');
+                  if (tz) tz.value = j.thermal_zone;
+                }
                 update();
               }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
             }

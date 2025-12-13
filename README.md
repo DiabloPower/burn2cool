@@ -77,15 +77,13 @@ Files in this repo
 ## 📊 Temperature Thresholds
 
 Default behavior (temp_max = 95°C):
-- **< 75°C**: 100% performance (full speed)
-- **75°C**: 85% performance (light throttling)
-- **82°C**: 65% performance (medium throttling)
-- **88°C**: 40% performance (strong throttling)
+- **< 65°C**: 100% performance (full speed)
+- **65°C to 95°C**: Linear throttling from 100% to 50% performance
 - **≥ 95°C**: Minimum frequency (emergency mode)
 
 > 💡 **New in v4.0**: You can now use `--avg-temp` for average temperature across multiple CPU zones, or specify a particular thermal zone with `--thermal-zone`. The daemon auto-detects the best CPU thermal zone by default.
 
-> 💡 Thresholds scale proportionally when using `--temp-max`. For example, `--temp-max 85` adjusts all thresholds accordingly.
+> 💡 Thresholds scale proportionally when using `--temp-max`. For example, `--temp-max 85` adjusts all thresholds accordingly (throttling starts at 55°C and reaches minimum at 85°C).
 
 ---
 
