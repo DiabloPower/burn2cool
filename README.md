@@ -1,6 +1,6 @@
 # Burn2Cool — The ROG Tamer CPU Throttle Daemon
 
-<img width="1100" height="980" alt="image" src="https://github.com/user-attachments/assets/08bc5cde-f9e2-42d5-8ac4-413b858f25b3" />
+<img width="1070" height="906" alt="image" src="https://github.com/user-attachments/assets/ecca4a9b-7b3e-4391-bfb9-3e47695f88eb" />
 
 A small, efficient Linux daemon that dynamically adjusts CPU maximum frequency based on temperature. It provides runtime control, profile management, an embedded web UI (optional) and an ncurses TUI (optional).
 
