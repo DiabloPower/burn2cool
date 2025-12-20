@@ -23,8 +23,98 @@
 typedef struct zone_entry { int zone; char type[64]; int temp; int excluded; } zone_entry_t;
 static zone_entry_t zones_arr[256];
 static int zones_count = 0;
-static int zones_sel = 0;
-static int zones_offset = 0;
+
+// Sensors mode: flattened list of HWMon sensors and thermal zones for TUI
+typedef struct sensor_entry { int kind; /*0=hwmon,1=zone*/ char name[256]; char path[512]; int temp; int excluded; int zone; char type[64]; } sensor_entry_t;
+static sensor_entry_t sensors_arr[512];
+static int sensors_count = 0;
+static int sensors_sel = 0;
+static int sensors_offset = 0;
+// Filtered display indices (indexes into sensors_arr) and count
+static int sensors_display_idx[512];
+static int sensors_display_count = 0;
+
+// Parse combined sensors JSON into sensors_arr for the TUI
+static void parse_sensors_json(const char *json) {
+    // reset
+    sensors_count = 0;
+    if (!json || *json == '\0') return;
+    const char *p = json;
+    // find hwmons array
+    const char *hw = strstr(p, "\"hwmons\":[");
+    if (hw) {
+        const char *a = strchr(hw, '[');
+        if (a) {
+            const char *q = a + 1;
+            while (*q && *q != ']') {
+                // Look for sensor objects within device
+                const char *dev_start = strchr(q, '{'); if (!dev_start) break;
+                // find matching '}' for this device (handle nested braces)
+                const char *dev_end = dev_start; int depth = 1; for (const char *t = dev_start + 1; *t && depth > 0; ++t) { if (*t == '{') depth++; else if (*t == '}') depth--; dev_end = t; }
+                if (depth != 0) break;
+                // crude parse for id and name
+                char dev_id[128] = ""; char dev_name[128] = "";
+                const char *id_pos = strstr(dev_start, "\"id\":"); if (id_pos) { const char *v = strchr(id_pos, ':'); if (v) { const char *s = strchr(v, '"'); if (s) { s++; const char *e = strchr(s, '"'); if (e) { int len = (int)(e - s); if (len >= (int)sizeof(dev_id)) len = (int)sizeof(dev_id)-1; snprintf(dev_id, sizeof(dev_id), "%.*s", len, s); } } } }
+                const char *name_pos = strstr(dev_start, "\"name\":"); if (name_pos) { const char *v = strchr(name_pos, ':'); if (v) { const char *s = strchr(v, '"'); if (s) { s++; const char *e = strchr(s, '"'); if (e) { int len = (int)(e - s); if (len >= (int)sizeof(dev_name)) len = (int)sizeof(dev_name)-1; snprintf(dev_name, sizeof(dev_name), "%.*s", len, s); } } } }
+                // Find sensors array inside device
+                const char *sensors_a = strstr(dev_start, "\"sensors\":"); if (sensors_a) {
+                    const char *sa = strchr(sensors_a, '['); if (!sa) { q = dev_end + 1; continue; }
+                    const char *s = sa + 1;
+                    while (*s && *s != ']') {
+                        const char *obj = strchr(s, '{'); if (!obj) break;
+                        const char *objend = obj; int d = 1; for (const char *t2 = obj + 1; *t2 && d > 0; ++t2) { if (*t2 == '{') d++; else if (*t2 == '}') d--; objend = t2; }
+                        if (d != 0) break;
+                        // extract label, path, temp, excluded
+                        char label[256] = ""; char path[512] = ""; int temp = -1; int excluded = 0;
+                        const char *lab = strstr(obj, "\"label\":"); if (lab) { const char *v = strchr(lab, ':'); if (v) { const char *ss = strchr(v, '"'); if (ss) { ss++; const char *ee = strchr(ss, '"'); if (ee) { int len = (int)(ee - ss); if (len >= (int)sizeof(label)) len = (int)sizeof(label)-1; snprintf(label, sizeof(label), "%.*s", len, ss); } } } }
+                        const char *pp = strstr(obj, "\"path\":"); if (pp) { const char *v = strchr(pp, ':'); if (v) { const char *ss = strchr(v, '"'); if (ss) { ss++; const char *ee = strchr(ss, '"'); if (ee) { int len = (int)(ee - ss); if (len >= (int)sizeof(path)) len = (int)sizeof(path)-1; snprintf(path, sizeof(path), "%.*s", len, ss); } } } }
+                        const char *tp = strstr(obj, "\"temp\":"); if (tp) { tp = strchr(tp, ':'); if (tp) { tp++; temp = atoi(tp); } }
+                        const char *ex = strstr(obj, "\"excluded\":true"); if (ex) excluded = 1;
+                        // build entry
+                        if (sensors_count < (int)(sizeof(sensors_arr)/sizeof(sensors_arr[0]))) {
+                            sensors_arr[sensors_count].kind = 0;
+                            snprintf(sensors_arr[sensors_count].name, sizeof(sensors_arr[sensors_count].name), "%s %s", dev_name[0] ? dev_name : dev_id, label[0] ? label : "(sensor)");
+                            snprintf(sensors_arr[sensors_count].path, sizeof(sensors_arr[sensors_count].path), "%s", path);
+                            sensors_arr[sensors_count].temp = temp;
+                            sensors_arr[sensors_count].excluded = excluded;
+                            sensors_arr[sensors_count].zone = -1;
+                            sensors_arr[sensors_count].type[0] = '\0';
+                            sensors_count++;
+                        }
+                        s = objend + 1;
+                    }
+                }
+                q = dev_end + 1;
+            }
+        }
+    }
+    // parse zones array
+    const char *z = strstr(p, "\"zones\":[");
+    if (z) {
+        const char *za = strchr(z, '['); if (za) {
+            const char *q = za + 1;
+            while (*q && *q != ']') {
+                const char *obj = strchr(q, '{'); if (!obj) break; const char *objend = strchr(obj, '}'); if (!objend) break;
+                int zone = -1; char type[64] = ""; int temp = -1; int excluded = 0;
+                const char *zonep = strstr(obj, "\"zone\":"); if (zonep) { zonep = strchr(zonep, ':'); if (zonep) zone = atoi(zonep+1); }
+                const char *tp = strstr(obj, "\"type\":"); if (tp) { const char *ss = strchr(tp, '"'); if (ss) { ss++; const char *ee = strchr(ss, '"'); if (ee) { int len = (int)(ee - ss); if (len >= (int)sizeof(type)) len = (int)sizeof(type)-1; snprintf(type, sizeof(type), "%.*s", len, ss); } } }
+                const char *tval = strstr(obj, "\"temp\":"); if (tval) { const char *ss = tval; ss = strchr(ss, ':'); if (ss) ss++; temp = atoi(ss); }
+                const char *ex = strstr(obj, "\"excluded\":true"); if (ex) excluded = 1;
+                if (sensors_count < (int)(sizeof(sensors_arr)/sizeof(sensors_arr[0]))) {
+                    sensors_arr[sensors_count].kind = 1;
+                    snprintf(sensors_arr[sensors_count].name, sizeof(sensors_arr[sensors_count].name), "Zone %d (%s)", zone, type);
+                    snprintf(sensors_arr[sensors_count].path, sizeof(sensors_arr[sensors_count].path), "/sys/class/thermal/thermal_zone%d/temp", zone);
+                    sensors_arr[sensors_count].temp = temp;
+                    sensors_arr[sensors_count].excluded = excluded;
+                    sensors_arr[sensors_count].zone = zone;
+                    snprintf(sensors_arr[sensors_count].type, sizeof(sensors_arr[sensors_count].type), "%s", type);
+                    sensors_count++;
+                }
+                q = objend + 1;
+            }
+        }
+    }
+}
 
 // Simple JSON pretty printer for limits/zones
 char* pretty_print_json(const char* json) {
@@ -157,6 +247,7 @@ char* format_limits_zones(const char* json, int is_limits) {
     buf[0] = '\0';
 
     if (is_limits) {
+
         // Parse {"cpu_min_freq":800000,"cpu_max_freq":4500000,"temp_sensor":"/sys/class/thermal/thermal_zone6/temp"}
         long cpu_min = -1, cpu_max = -1;
         char temp_sensor[256] = "";
@@ -308,8 +399,9 @@ static char status_buf[4096] = "(no status yet)";
 static time_t status_ts = 0;
 static char limits_buf[4096] = "(no limits yet)";
 static time_t limits_ts = 0;
-static char zones_buf[4096] = "(no zones yet)";
-static time_t zones_ts = 0;
+// Sensors JSON (combined hwmons+zones)
+static char sensors_buf[16384] = "(no sensors yet)";
+static time_t sensors_ts = 0;
 static char skins_buf[4096] = "(no skins yet)";
 static time_t skins_ts = 0;
 static char last_msg[256] = "";
@@ -1027,28 +1119,28 @@ static void spawn_fetch_status_async(void) {
     pthread_attr_destroy(&attr);
 }
 
-// spawn a worker to fetch zones now and update state (non-blocking)
-static void *worker_fetch_zones(void *v) {
+// spawn a worker to fetch sensors (hwmons + zones) now and update state (non-blocking)
+static void *worker_fetch_sensors(void *v) {
     (void)v;
-    char *r = send_unix_command("zones json");
+    char *r = send_unix_command("sensors json");
     pthread_mutex_lock(&state_lock);
     if (r) {
-        snprintf(zones_buf, sizeof(zones_buf), "%s", r);
-        zones_buf[sizeof(zones_buf)-1] = '\0';
+        snprintf(sensors_buf, sizeof(sensors_buf), "%s", r);
+        sensors_buf[sizeof(sensors_buf)-1] = '\0';
         free(r);
-        zones_ts = time(NULL);
-        set_last_msg("Zones refreshed");
+        sensors_ts = time(NULL);
+        set_last_msg("Sensors refreshed");
     } else {
-        snprintf(zones_buf, sizeof(zones_buf), "(daemon unreachable)");
-        zones_buf[sizeof(zones_buf)-1] = '\0';
+        snprintf(sensors_buf, sizeof(sensors_buf), "(daemon unreachable)");
+        sensors_buf[sizeof(sensors_buf)-1] = '\0';
     }
     pthread_mutex_unlock(&state_lock);
     return NULL;
 }
 
-static void spawn_fetch_zones_async(void) {
+static void spawn_fetch_sensors_async(void) {
     pthread_t t; pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&t, &attr, worker_fetch_zones, NULL);
+    pthread_create(&t, &attr, worker_fetch_sensors, NULL);
     pthread_attr_destroy(&attr);
 }
 
@@ -1307,15 +1399,15 @@ static void *poller_thread(void *v) {
         }
         pthread_mutex_unlock(&state_lock);
 
-        // Update zones
-        r = send_unix_command("zones json");
+        // Update sensors (combined hwmons + zones)
+        r = send_unix_command("sensors json");
         pthread_mutex_lock(&state_lock);
         if (r) {
-            snprintf(zones_buf, sizeof(zones_buf), "%s", r);
+            snprintf(sensors_buf, sizeof(sensors_buf), "%s", r);
             free(r);
-            zones_ts = time(NULL);
+            sensors_ts = time(NULL);
         } else {
-            snprintf(zones_buf, sizeof(zones_buf), "(daemon unreachable)");
+            snprintf(sensors_buf, sizeof(sensors_buf), "(daemon unreachable)");
         }
         pthread_mutex_unlock(&state_lock);
 
@@ -1544,7 +1636,7 @@ int main() {
         int webui_enabled = (web_port > 0) ? 1 : 0;
         // data window - depends on current_mode
         werase(data); box(data,0,0);
-        const char *all_mode_names[] = {"Limits", "Zones", "Profiles", "Skins"};
+        const char *all_mode_names[] = {"Limits", "Sensors", "Profiles", "Skins"};
         const char *mode_names[4];
         int local_mode_count = 0;
         mode_names[local_mode_count++] = all_mode_names[0];
@@ -1582,27 +1674,69 @@ int main() {
                 line++;
             }
             (void)ts;
-        } else if (current_mode == 1) { // Zones
+        } else if (current_mode == 1) { // Sensors
             pthread_mutex_lock(&state_lock);
-            char local_zones[4096]; snprintf(local_zones, sizeof(local_zones), "%s", zones_buf);
-            time_t ts = zones_ts;
+            char local_sensors[16384]; snprintf(local_sensors, sizeof(local_sensors), "%s", sensors_buf);
+            time_t ts = sensors_ts;
             pthread_mutex_unlock(&state_lock);
-            zones_count = 0; // reset before parsing
-            (void)format_limits_zones(local_zones, 0);
-            // Display parsed zones array with interactive selection
-            if (zones_count == 0) {
-                mvwprintw(data,1,2,"(no zones)");
+            sensors_count = 0; // reset before parsing
+            parse_sensors_json(local_sensors);
+            // Determine sensor_source from status so we can filter the list (auto shows both)
+            pthread_mutex_lock(&state_lock);
+            char local_status[4096]; snprintf(local_status, sizeof(local_status), "%s", status_buf);
+            pthread_mutex_unlock(&state_lock);
+            char cur_src[32] = "";
+            char *ps = strstr(local_status, "\"sensor_source\"");
+            if (ps) {
+                ps = strchr(ps, ':'); if (ps) { ps++; while (*ps && isspace((unsigned char)*ps)) ps++; if (*ps == '"') { ps++; char *q = strchr(ps, '"'); if (q) { int len = (int)(q - ps); if (len >= (int)sizeof(cur_src)) len = (int)sizeof(cur_src)-1; snprintf(cur_src, sizeof(cur_src), "%.*s", len, ps); } } else { char *q = ps; int i = 0; while (*q && !isspace((unsigned char)*q) && *q != ',' && i < (int)sizeof(cur_src)-1) cur_src[i++] = *q++; cur_src[i] = '\0'; } }
+            }
+            int filter = 0; // 0=all,1=hwmon only,2=thermal only
+            if (strcmp(cur_src, "hwmon") == 0) filter = 1;
+            else if (strcmp(cur_src, "thermal") == 0) filter = 2;
+            // Build filtered display index
+            sensors_display_count = 0;
+            for (int i = 0; i < sensors_count && sensors_display_count < (int)(sizeof(sensors_display_idx)/sizeof(sensors_display_idx[0])); ++i) {
+                if (filter == 0 || (filter == 1 && sensors_arr[i].kind == 0) || (filter == 2 && sensors_arr[i].kind == 1)) {
+                    sensors_display_idx[sensors_display_count++] = i;
+                }
+            }
+            // Debugging info: show counts and first few entries in footer
+            {
+                char dbg[256] = ""; char tmp[128]; snprintf(dbg, sizeof(dbg), "Sensors total=%d filtered=%d src=%s", sensors_count, sensors_display_count, cur_src[0] ? cur_src : "auto");
+                for (int k = 0; k < sensors_display_count && k < 4; ++k) { int idx = sensors_display_idx[k]; snprintf(tmp, sizeof(tmp), " %s", sensors_arr[idx].name); strncat(dbg, tmp, sizeof(dbg)-strlen(dbg)-1); }
+                set_last_msg("%s", dbg);
+            }
+            // Write full filtered list to /tmp/tui-sensors.txt for inspection
+            {
+                FILE *f = fopen("/tmp/tui-sensors.txt", "w");
+                if (f) {
+                    for (int i = 0; i < sensors_display_count; ++i) {
+                        int idx = sensors_display_idx[i];
+                        fprintf(f, "%d: kind=%d name=%s path=%s temp=%d excluded=%d\n", i, sensors_arr[idx].kind, sensors_arr[idx].name, sensors_arr[idx].path, sensors_arr[idx].temp, sensors_arr[idx].excluded);
+                    }
+                    fclose(f);
+                }
+            }
+            // Display parsed sensors array with interactive selection (filtered)
+            if (sensors_display_count == 0) {
+                mvwprintw(data,1,2,"(no sensors)");
             } else {
-                if (zones_sel < 0) zones_sel = 0;
-                if (zones_sel >= zones_count) zones_sel = zones_count - 1;
-                if (zones_sel < zones_offset) zones_offset = zones_sel;
-                if (zones_sel >= zones_offset + page_lines) zones_offset = zones_sel - page_lines + 1;
-                for (int i = zones_offset; i < zones_count && i < zones_offset + page_lines; ++i) {
-                    int row = i - zones_offset + 1;
-                    if (i == zones_sel) wattron(data, A_REVERSE);
-                    char linebuf[256]; snprintf(linebuf, sizeof(linebuf), "Zone %d (%s): %s %d°C", zones_arr[i].zone, zones_arr[i].type, zones_arr[i].excluded ? "Excluded" : "Included", zones_arr[i].temp);
-                    mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, linebuf, data_horiz_offset, (i == zones_sel));
-                    if (i == zones_sel) wattroff(data, A_REVERSE);
+                if (sensors_sel < 0) sensors_sel = 0;
+                if (sensors_sel >= sensors_display_count) sensors_sel = sensors_display_count - 1;
+                if (sensors_sel < sensors_offset) sensors_offset = sensors_sel;
+                if (sensors_sel >= sensors_offset + page_lines) sensors_offset = sensors_sel - page_lines + 1;
+                for (int i = sensors_offset; i < sensors_display_count && i < sensors_offset + page_lines; ++i) {
+                    int idx = sensors_display_idx[i];
+                    int row = i - sensors_offset + 1;
+                    if (i == sensors_sel) wattron(data, A_REVERSE);
+                    char linebuf[512];
+                    if (sensors_arr[idx].kind == 0) {
+                        snprintf(linebuf, sizeof(linebuf), "HWMon: %s : %d°C", sensors_arr[idx].name, sensors_arr[idx].temp);
+                    } else {
+                        snprintf(linebuf, sizeof(linebuf), "Zone %d (%s): %s %d°C", sensors_arr[idx].zone, sensors_arr[idx].type, sensors_arr[idx].excluded ? "Excluded" : "Included", sensors_arr[idx].temp);
+                    }
+                    mvwprintw_scrollable(data, row, 2, getmaxx(data)-4, linebuf, data_horiz_offset, (i == sensors_sel));
+                    if (i == sensors_sel) wattroff(data, A_REVERSE);
                 }
             }
             (void)ts;
@@ -1662,7 +1796,7 @@ int main() {
             // paginated, wrapped help content: core + mode-specific
             const char *core_lines[] = {
                 "h/H/? : toggle help",
-                "Tab : switch mode (Limits/Zones/Skins/Profiles)",
+                "Tab : switch mode (Limits/Sensors/Skins/Profiles)",
                 "f : Show full-line popup (press any key to dismiss)",
                 "r : Manual refresh (fetch data from daemon)",
                 "R : Toggle raw status JSON (popup)",
@@ -1678,9 +1812,10 @@ int main() {
                 "t : set temp_max",
             };
             const char *zones_lines[] = {
-                "Zones mode commands:",
-                "UP/DN : select zone",
-                "x : toggle exclude for selected zone",
+                "Sensors mode commands:",
+                "UP/DN : select sensor",
+                "x : toggle exclude for selected sensor",
+                "o : cycle sensor source (auto->hwmon->thermal)",
                 "v : toggle use average temp",
                 "Left/Right: horiz scroll selected line | f: view full line",
             };
@@ -1754,8 +1889,8 @@ int main() {
             const char* ks_short = "  Keys: h help | Tab mode | i install | x delete | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
-        } else if (current_mode == 1) { // Zones
-            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | UP/DN nav | x toggle exclude | v toggle avg temp | q quit | R raw status | S start | Left/Right | f");
+        } else if (current_mode == 1) { // Sensors
+            char ks[512]; snprintf(ks, sizeof(ks), "  Keys: h help | Tab mode | UP/DN nav | x toggle exclude | o cycle source | v toggle avg temp | q quit | R raw status | S start | Left/Right | f");
             const char* ks_short = "  Keys: h help | Tab mode | r refresh | UP/DN | q quit | f";
             if ((int)strlen(ks) <= width) mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks);
             else mvwprintw(footerwin, 1, 1, "%.*s", width - 2, ks_short);
@@ -1806,17 +1941,17 @@ int main() {
         else if (current_mode == 2 && ch == KEY_DOWN) { if (sel<display_count-1) sel++; data_horiz_offset = 0; }
         else if (current_mode == 3 && ch == KEY_UP) { if (skins_sel>0) skins_sel--; data_horiz_offset = 0; }
         else if (current_mode == 3 && ch == KEY_DOWN) { if (skins_sel<skins_count-1) skins_sel++; data_horiz_offset = 0; }
-        else if (current_mode == 1 && ch == KEY_UP) { if (zones_sel>0) zones_sel--; data_horiz_offset = 0; }
-        else if (current_mode == 1 && ch == KEY_DOWN) { if (zones_sel<zones_count-1) zones_sel++; data_horiz_offset = 0; }
+        else if (current_mode == 1 && ch == KEY_UP) { if (sensors_sel>0) sensors_sel--; data_horiz_offset = 0; }
+        else if (current_mode == 1 && ch == KEY_DOWN) { if (sensors_sel<sensors_count-1) sensors_sel++; data_horiz_offset = 0; }
         else if (current_mode == 0 && ch == KEY_UP) { if (limits_sel>0) limits_sel--; data_horiz_offset = 0; }
         else if (current_mode == 0 && ch == KEY_DOWN) { if (limits_sel < limits_count - 1) limits_sel++; data_horiz_offset = 0; }
         else if (ch == KEY_LEFT) { if (data_horiz_offset > 0) data_horiz_offset -= 4; if (data_horiz_offset < 0) data_horiz_offset = 0; }
         else if (ch == KEY_RIGHT) { data_horiz_offset += 4; }
         else if (ch == 'f') {
             // show full content for selected line in data pane as popup
-            if (current_mode == 1 && zones_count > 0) {
-                char buf[512]; snprintf(buf, sizeof(buf), "Zone %d (%s): %s %d°C", zones_arr[zones_sel].zone, zones_arr[zones_sel].type, zones_arr[zones_sel].excluded ? "Excluded" : "Included", zones_arr[zones_sel].temp);
-                int pw = getmaxx(stdscr)-4; int len = (int)strlen(buf) + 4; if (pw > len) pw = len; int ph = 6;
+            if (current_mode == 1 && sensors_count > 0) {
+                char buf[1024]; if (sensors_arr[sensors_sel].kind == 0) snprintf(buf, sizeof(buf), "HWMon: %s\nPath: %s\nTemp: %d°C\nExcluded: %s", sensors_arr[sensors_sel].name, sensors_arr[sensors_sel].path, sensors_arr[sensors_sel].temp, sensors_arr[sensors_sel].excluded ? "yes" : "no"); else snprintf(buf, sizeof(buf), "Zone %d (%s)\nPath: %s\nTemp: %d°C\nExcluded: %s", sensors_arr[sensors_sel].zone, sensors_arr[sensors_sel].type, sensors_arr[sensors_sel].path, sensors_arr[sensors_sel].temp, sensors_arr[sensors_sel].excluded ? "yes" : "no");
+                int pw = getmaxx(stdscr)-4; int len = (int)strlen(buf) + 4; if (pw > len) pw = len; int ph = 8;
                 WINDOW *pwin = newwin(ph, pw, (getmaxy(stdscr)-ph)/2, (getmaxx(stdscr)-pw)/2);
                 box(pwin, 0,0); mvwprintw(pwin,1,2, "%s", buf); mvwprintw(pwin,ph-2,2, "press any key"); wrefresh(pwin); wgetch(pwin); delwin(pwin);
             } else if (current_mode == 2 && display_count > 0) {
@@ -1855,34 +1990,42 @@ int main() {
                 }
             }
         }
-        else if (current_mode == 1 && ch == KEY_NPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; zones_sel += page; if (zones_sel >= zones_count) zones_sel = zones_count - 1; }
-        else if (current_mode == 1 && ch == KEY_PPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; zones_sel -= page; if (zones_sel < 0) zones_sel = 0; }
+        else if (current_mode == 1 && ch == KEY_NPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; sensors_sel += page; if (sensors_sel >= sensors_display_count) sensors_sel = sensors_display_count - 1; }
+        else if (current_mode == 1 && ch == KEY_PPAGE) { int page = getmaxy(data) - 3; if (page < 1) page = 1; sensors_sel -= page; if (sensors_sel < 0) sensors_sel = 0; }
         else if (current_mode == 1 && (ch == 'x' || ch == 'X')) {
-            if (zones_count == 0) { set_last_msg("No zones to toggle"); }
+            if (sensors_display_count == 0) { set_last_msg("No sensors to toggle"); }
             else {
-                // Determine token to toggle (normalize zone type)
-                char token[128]; snprintf(token, sizeof(token), "%s", zones_arr[zones_sel].type);
+                int vis_idx = sensors_sel;
+                if (vis_idx < 0) {
+                    vis_idx = 0;
+                }
+                if (vis_idx >= sensors_display_count) {
+                    vis_idx = sensors_display_count - 1;
+                }
+                int idx = sensors_display_idx[vis_idx];
+                // Determine token to toggle: zone.type for zones, or sensor name for hwmon
+                char token[256]; if (sensors_arr[idx].kind == 1) snprintf(token, sizeof(token), "%s", sensors_arr[idx].type); else snprintf(token, sizeof(token), "%s", sensors_arr[idx].name);
                 // trim and lowercase
                 char *s = token; while (*s && isspace((unsigned char)*s)) s++; char *e = s + strlen(s) - 1; while (e > s && isspace((unsigned char)*e)) { *e = '\0'; e--; }
                 for (char *p = s; *p; ++p) *p = tolower((unsigned char)*p);
                 if (!s || !*s) { set_last_msg("Empty token" ); continue; }
                 // Fetch existing excluded-types CSV from daemon so we don't clobber tokens unknown to this device
-                char existing_csv[1024] = "";
+                char existing_csv[4096] = "";
                 char *resp = send_unix_command("get-excluded-types");
                 if (resp) {
                     snprintf(existing_csv, sizeof(existing_csv), "%s", resp);
                     free(resp);
                 }
                 // Remember previous excluded state
-                int was_excluded = zones_arr[zones_sel].excluded;
+                int was_excluded = sensors_arr[idx].excluded;
                 // Parse CSV into list and dedupe
-                char tokens[64][128]; int token_count = 0;
+                char tokens[128][256]; int token_count = 0;
                 if (existing_csv[0]) {
-                    char tmp[1024]; snprintf(tmp, sizeof(tmp), "%s", existing_csv);
+                    char tmp[2048]; snprintf(tmp, sizeof(tmp), "%s", existing_csv);
                     char *tok = strtok(tmp, ",");
                     while (tok) {
                         // trim and lowercase
-                        char tk[128]; snprintf(tk, sizeof(tk), "%s", tok);
+                        char tk[256]; snprintf(tk, sizeof(tk), "%s", tok);
                         char *tk_s = tk; while (*tk_s && isspace((unsigned char)*tk_s)) tk_s++; char *tk_e = tk_s + strlen(tk_s) - 1; while (tk_e > tk_s && isspace((unsigned char)*tk_e)) { *tk_e = '\0'; tk_e--; }
                         for (char *p = tk_s; *p; ++p) *p = tolower((unsigned char)*p);
                         if (tk_s && *tk_s) {
@@ -1897,9 +2040,6 @@ int main() {
                 if (!present) {
                     if (token_count < (int)(sizeof(tokens)/sizeof(tokens[0]))) { snprintf(tokens[token_count], sizeof(tokens[0]), "%s", s); token_count++; }
                 }
-                else {
-                    // removed by exact match; present==1 and token removed above
-                }
                 // If we were excluded but didn't find an exact token to remove, attempt substring matches
                 if (was_excluded && !present) {
                     int removed_any = 0;
@@ -1910,28 +2050,45 @@ int main() {
                             token_count--; i--; removed_any = 1;
                         }
                     }
-                    // if we removed substring tokens, update present flag to reflect toggle-off
-                    if (removed_any) present = 1; // treat as removal
+                    if (removed_any) present = 1;
                 }
                 // rebuild csv
-                char csv[1024] = "";
+                char csv[4096] = "";
                 for (int i = 0; i < token_count; ++i) {
                     if (i) strncat(csv, ",", sizeof(csv)-strlen(csv)-1);
                     strncat(csv, tokens[i], sizeof(csv)-strlen(csv)-1);
                 }
-                // apply optimistic UI change to zone
-                zones_arr[zones_sel].excluded = present ? 0 : 1;
+                // apply optimistic UI change to sensor
+                sensors_arr[idx].excluded = present ? 0 : 1;
                 // send to daemon
-                // unique types not required in this toggle implementation
-                char cmd[1536];
+                char cmd[8192];
                 if (csv[0] == '\0') snprintf(cmd, sizeof(cmd), "set-excluded-types none");
                 else snprintf(cmd, sizeof(cmd), "set-excluded-types %s", csv);
                 spawn_cmd_async(cmd);
-                // refresh zones and status so UI shows persisted change and saved value
-                spawn_fetch_zones_async();
+                // refresh sensors and status so UI shows persisted change and saved value
+                spawn_fetch_sensors_async();
                 spawn_fetch_status_async();
-                set_last_msg("Toggled excluded for %s", zones_arr[zones_sel].type);
+                set_last_msg("Toggled excluded for %s", s);
             }
+        }
+        else if (current_mode == 1 && (ch == 'o' || ch == 'O')) {
+            // cycle sensor source: auto -> hwmon -> thermal -> auto
+            // get current sensor_source from status
+            pthread_mutex_lock(&state_lock);
+            char local_status[4096]; snprintf(local_status, sizeof(local_status), "%s", status_buf);
+            pthread_mutex_unlock(&state_lock);
+            char *p = strstr(local_status, "\"sensor_source\"");
+            char cur_src[32] = "";
+            if (p) { p = strchr(p, ':'); if (p) { p++; while (*p && isspace((unsigned char)*p)) p++; if (*p == '"') { p++; char *q = strchr(p, '"'); if (q) { int len = (int)(q - p); if (len >= (int)sizeof(cur_src)) len = (int)sizeof(cur_src)-1; snprintf(cur_src, sizeof(cur_src), "%.*s", len, p); } } else { // bare token
+                        char *q = p; int i = 0; while (*q && !isspace((unsigned char)*q) && *q != ',' && i < (int)sizeof(cur_src)-1) cur_src[i++] = *q++; cur_src[i] = '\0'; } } }
+            const char *next = "hwmon";
+            if (strcmp(cur_src, "hwmon") == 0) next = "thermal";
+            else if (strcmp(cur_src, "thermal") == 0) next = "auto";
+            else next = "hwmon"; // default from auto/unknown
+            char cmd[128]; snprintf(cmd, sizeof(cmd), "set-sensor-source %s", next);
+            spawn_cmd_async(cmd);
+            spawn_fetch_sensors_async(); spawn_fetch_status_async();
+            set_last_msg("Set sensor source to %s", next);
         }
         else if (current_mode == 1 && (ch == 'v' || ch == 'V')) {
             int cur = get_use_avg_temp();

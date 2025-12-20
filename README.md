@@ -6,7 +6,7 @@ A small, efficient Linux daemon that dynamically adjusts CPU maximum frequency b
 
 ## ✨ What's New in v4.0
 
-- **Automatic Thermal Zone Detection**: Smart auto-detection of CPU thermal zones with manual override options
+- **Automatic Sensor Detection (HWMon preferred)**: Smart auto-detection of the best CPU temperature sensor — prefers HWMon sensors (`/sys/class/hwmon/...`) when available and falls back to thermal zones (`/sys/class/thermal/...`) with manual overrides available
 - **Average Temperature Support**: Use average temperature across multiple CPU zones for better accuracy
 - **System Skins**: Install and manage custom web UI skins system-wide
 - **Enhanced Security**: Hardened installation with secure command execution
@@ -52,7 +52,7 @@ make -j$(nproc)
 Key notes
 ---------
 - The web dashboard and REST API are embedded in the daemon (default port 8086). Configure via `/etc/cpu_throttle.conf` or `--web-port`.
-- **New in v4.0**: Automatic thermal zone detection finds the best CPU sensor, with manual override options.
+- **New in v4.1**: Automatic sensor detection prefers HWMon sensors when available and falls back to thermal zones; the Web UI shows the active sensor path and source (HWMon vs Thermal).
 - **New in v4.0**: Average temperature mode uses multiple CPU zones for more accurate readings.
 - **New in v4.0**: System-wide skins can be installed and managed through the web UI.
 - `make assets` converts files in `assets/` into `include/*.h` (the Makefile falls back to a Python generator if `xxd` is missing).
@@ -83,7 +83,7 @@ Default behavior (temp_max = 95°C):
 - **65°C to 95°C**: Linear throttling from 100% to 50% performance
 - **≥ 95°C**: Minimum frequency (emergency mode)
 
-> 💡 **New in v4.0**: You can now use `--avg-temp` for average temperature across multiple CPU zones, or specify a particular thermal zone with `--thermal-zone`. The daemon auto-detects the best CPU thermal zone by default.
+> 💡 **New in v4.0**: You can now use `--avg-temp` for average temperature across multiple CPU zones. The CLI flag `--sensor-source <auto|hwmon|thermal>` allows you to prefer a sensor source (HWMon / thermal), and explicit sensor path selection is still available with `--sensor <path>`. By default the daemon tries to auto-detect the best sensor — it prefers HWMon sensors (e.g. `coretemp`, `k10temp`) when present and falls back to thermal zones.
 
 > 💡 Thresholds scale proportionally when using `--temp-max`. For example, `--temp-max 85` adjusts all thresholds accordingly (throttling starts at 55°C and reaches minimum at 85°C).
 
@@ -123,7 +123,7 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
 ```
 --dry-run              Simulation mode (no actual frequency changes)
 --log <path>           Log file path for debugging
---sensor <path>        Custom temperature sensor path (default: auto-detected)
+--sensor [path|list]   Custom temperature sensor path (default: auto-detected). Use `--sensor list` or `--sensor` to enumerate available sensors. Note: in the Web UI sensor selection is now in a small Sensor modal (⚙) next to the Avg Temp toggle.
 --thermal-zone <num>   Specify thermal zone number (overrides auto-detection)
 --avg-temp             Use average temperature across CPU zones
 --safe-min <freq>      Minimum frequency limit in kHz

@@ -211,7 +211,9 @@ void print_help(const char *name) {
     printf("  set-safe-max <freq>    Set maximum frequency in kHz\n");
     printf("  set-safe-min <freq>    Set minimum frequency in kHz\n");
     printf("  set-temp-max <temp>    Set maximum temperature in °C\n");
-    printf("  set-thermal-zone <num> Set thermal zone (-1=auto, 0-100)\n");
+    printf("  set-sensor-source <auto|hwmon|thermal>    Set preferred sensor source (persisted)\n");
+    printf("  set-sensor <path|auto>                    Set explicit sensor path or reset to auto (persisted)\n");
+    printf("  sensors                 List available HWMon sensors and thermal zones (accepts --json/-j and --pretty/-p)\n");
     printf("  set-use-avg-temp <0|1> Use average CPU temperature (0=no, 1=yes)\n");
     printf("  set-excluded-types <csv>  Comma-separated thermal type names to exclude (e.g. INT3400,INT3402)\n");
     printf("    --merge <csv>         Merge the supplied csv into existing excluded types (no overwrite)\n");
@@ -818,6 +820,13 @@ int main(int argc, char *argv[]) {
             char *resp = send_command_get_response("zones json"); if (!resp) { fprintf(stderr, "Error: failed to query zones\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
         }
         return send_command("zones");
+    }
+    if (strcmp(argv[1], "sensors") == 0) {
+        if (argc >= 3 && (strcmp(argv[2], "--json") == 0 || strcmp(argv[2], "-j") == 0 || strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0)) {
+            int pretty = (strcmp(argv[2], "--pretty") == 0 || strcmp(argv[2], "-p") == 0) ? 1 : 0;
+            char *resp = send_command_get_response("sensors json"); if (!resp) { fprintf(stderr, "Error: failed to query sensors\n"); return 1; } if (pretty) print_json_pretty_or_raw(resp); else printf("%s\n", resp); free(resp); return 0;
+        }
+        return send_command("sensors");
     }
 
     // get-excluded-types: support optional --json/-j or --pretty/-p

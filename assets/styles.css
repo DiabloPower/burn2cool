@@ -196,8 +196,76 @@ textarea#pcontent{min-height:160px}
 #confirmModal{z-index:99999}
 .modal.hidden{display:none}
 .modal-overlay{position:absolute;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.6)}
-.modal-content{position:relative;z-index:2;background:#222;padding:18px;border-radius:8px;min-width:320px;max-width:90%;box-shadow:0 8px 24px rgba(0,0,0,0.5);}
+.modal-content{position:relative;z-index:2;background:rgba(34,34,34,0.96);padding:18px;border-radius:8px;min-width:320px;max-width:90%;box-shadow:0 8px 24px rgba(0,0,0,0.5);} 
 .modal-message{color:#fff;margin-bottom:12px;font-size:1rem}
+
+/* Modal form elements should match the site look */
+.modal-content input, .modal-content select, .modal-content textarea { background:#333; color:#fff; border:1px solid #555; padding:8px; border-radius:6px; }
+.modal-content .profiles-select { background:#333; color:#fff; border:1px solid #555; padding:8px 12px; height:40px; }
+.modal-content label{color:#ddd;min-width:0;margin-bottom:4px}
+
+/* Excludes modal unified card styling */
+/* Scroll container: reserves space for scrollbars and keeps them inside the rounded container */
+.excludes-scroll { max-height:60vh; overflow:auto; padding:8px; border-radius:8px; scrollbar-gutter: stable; padding-right:12px; background: linear-gradient(180deg, rgba(255,255,255,0.002), rgba(255,255,255,0.000)); }
+
+/* Group cards inside the scroll area */
+.exclude-group { margin-top:8px; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.00)); overflow:visible }
+.exclude-group-header { font-weight:600; color:#fff; margin-bottom:6px; display:flex; align-items:center; gap:8px }
+.exclude-group-id { color:#9aa; font-weight:400; font-size:0.9em }
+.exclude-item { padding:6px 4px; border-radius:6px; display:flex; align-items:center; gap:10px }
+.exclude-item label { width:100%; display:flex; align-items:center; gap:10px; color:#ddd }
+.exclude-item:hover { background: rgba(255,255,255,0.01); }
+.exclude-item .exclude-item-label { font-weight:500; color:#fff }
+.exclude-item .exclude-item-meta { margin-left:auto; color:#9aa; font-size:0.9em }
+.exclude-item input[type="checkbox"] { width:18px; height:18px }
+
+/* Slightly tighten spacing for small screens */
+@media (max-width:700px) { .exclude-group { padding:8px } .exclude-item { padding:8px 4px } }
+
+/* Fix layout between ~560px and 480px where .setting-row button rules earlier can force full-width buttons
+   Ensure the AVG button can flex and the gear button keeps a fixed small width so it doesn't force shrinking */
+@media (max-width:560px) and (min-width:480px) {
+  .setting-row.avg-row .avg-controls { display:flex; gap:8px; align-items:center; }
+  /* undo the generic .setting-row button width:100% for this specific row */
+  .setting-row.avg-row .avg-controls button { width: auto; }
+  .setting-row.avg-row .avg-controls #avgBtn { flex:1 1 auto; min-width:0; }
+  .setting-row.avg-row .avg-controls .sensor-btn { flex:0 0 44px; width:44px; height:44px; }
+}
+
+/* Sensor controls: make Source and Device selects equal width and responsive */
+.sensor-controls { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; align-items:end; }
+.sensor-controls .field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.sensor-controls .field .profiles-select { width:100%; box-sizing:border-box; max-width:46ch; }
+
+/* Allow selects to fill the available space between 480px and 560px (prevent fixed ch-based max from constraining) */
+@media (max-width:560px) and (min-width:480px) {
+  .sensor-controls .field .profiles-select { max-width:100%; }
+}
+@media (max-width:950px) { .sensor-controls { grid-template-columns: 1fr; } }
+
+/* Avg controls: make gear button fixed and prevent it from shrinking the avg button */
+.avg-controls{ display:flex; gap:8px; align-items:center }
+.avg-controls #avgBtn{ flex:1; min-width:0 }
+.avg-controls .sensor-btn{ flex:0 0 48px; width:48px; height:48px; padding:0; display:inline-flex; align-items:center; justify-content:center; border-radius:6px; }
+@media (max-width:700px) { .avg-controls .sensor-btn{ flex:0 0 44px; width:44px; height:44px } }
+.modal-content .btn-secondary, .modal-content .btn-enabled { height:40px; padding:8px 12px }
+
+/* Sensor value truncation in status card: hide start (show tail) using RTL container */
+/* Sensor value default behavior: show tail with leading ellipsis when in compact rows */
+/* Ensure inline sensor (moved into .label) uses the same visual style as .value and aligns to the right */
+.status-row .label { display:flex; align-items:center; gap:8px; }
+.status-row .label #sensor { font-size:1.6em; font-weight:bold; color:#FF8C00; margin-left:auto; text-align:right; flex:0 1 48ch; max-width:48ch; overflow:hidden; white-space:nowrap; display:inline-block; vertical-align:middle; direction:rtl; position:relative; }
+#sensor > span { direction:ltr; display:inline-block; }
+#sensor[title] { cursor:help; }
+#sensor.truncated::before { content:'...'; position:relative; left:0; color:#bbb; margin-right:6px; transform:translateX(-4px); }
+
+/* Sensor full-row behavior: show full path and allow wrapping */
+.status-row.sensor-row { display:flex; flex-direction:column; align-items:flex-start; gap:6px }
+.status-row.sensor-row .value { width:100%; text-align:left; white-space:normal; overflow:visible; direction:ltr }
+.status-row.sensor-row .value > span { display:inline; word-break:break-all; }
+
+/* Make modal overlay slightly more prominent on small screens */
+@media (max-width:700px) { .modal-overlay { background: rgba(0,0,0,0.72); } }
 .modal-actions{display:flex;gap:8px;justify-content:flex-end}
 .modal-actions button{min-width:120px}
 /* Make select more compact on smaller mobile */
@@ -212,16 +280,26 @@ textarea#pcontent{min-height:160px}
   /* Make cards single-column when viewport becomes narrow */
   .cards-grid{grid-template-columns:1fr}
 }
-@media (max-width:480px) {
+@media (max-width:560px) {
   .settings-grid{grid-template-columns:1fr}
   .status-grid{grid-template-columns:1fr}
   .card { margin:8px 0; }
   select { font-size: 0.95rem; }
+  /* Ensure sensor display wraps and allows word-break at small widths */
+  #sensor { direction: ltr; white-space: normal; word-break: break-word; max-width:100%; overflow:visible }
+  #sensor > span { white-space: normal }
 }
 
 /* Floating Action Button (FAB) for skins */
 .fab{position:fixed;right:20px;bottom:20px;background:#FF8C00;color:#fff;border:none;padding:12px 14px;border-radius:999px;box-shadow:0 8px 20px rgba(0,0,0,0.4);z-index:1200;cursor:pointer;font-weight:700}
 .fab:hover{transform:translateY(-2px);}
+
+/* HWMon summary and small sensor button styling */
+
+.sensor-btn{padding:6px;width:34px;height:34px;border-radius:4px;background:#333;color:#fff;border:1px solid #444;cursor:pointer}
+.sensor-btn:hover{background:#444}
+.avg-controls{display:flex;gap:6px;align-items:center}
+.modal-actions-right{display:flex;gap:8px;justify-content:flex-end}
 .skin-card img{display:block}
 .skin-card{display:flex;flex-direction:column}
 .skin-card .skin-actions{display:flex;justify-content:flex-end;gap:6px;align-items:center;flex-wrap:wrap}
@@ -235,6 +313,10 @@ textarea#pcontent{min-height:160px}
 @media (max-width:700px) {
   .fab{position:static;right:auto;bottom:auto;width:100%;border-radius:6px;margin-top:12px;display:block}
 }
+/* Also treat viewports <=950px as mobile for the skins FAB so it collapses earlier */
+@media (max-width:950px) {
+  .fab{position:static;right:auto;bottom:auto;width:100%;border-radius:6px;margin-top:12px;display:block}
+}
 .modal-content .modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .modal-content #skinsContainer{display:flex;gap:10px;flex-wrap:wrap;max-height:60vh;overflow:auto;padding:6px}
 .modal-content #skinsContainer .skin-card{width:220px;background:#111;border:1px solid #333;border-radius:8px;padding:8px;box-sizing:border-box}
@@ -244,17 +326,18 @@ textarea#pcontent{min-height:160px}
 .btn-secondary:hover{background:#444}
 .modal-header .modal-actions{display:flex;gap:8px;align-items:center}
 /* Header action group for skins modal */
-.modal-header{display:flex;flex-direction:column;gap:8px;margin-bottom:6px}
+.modal-header{display:flex;flex-direction:row;align-items:center;gap:8px;margin-bottom:6px}
 .modal-row-actions{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .header-left{display:flex;align-items:center;gap:8px}
 .header-right{display:flex;align-items:center;gap:8px}
 .btn-icon { display:inline-flex; align-items:center; gap:6px; }
 .btn-icon svg { margin-right: 6px; width: 16px; height: 16px; }
 .btn-icon span { display: inline-block; }
-.btn-close{background:#c0392b;color:#fff;border-radius:999px;border:none;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:1.1rem;line-height:1;z-index:1000}
+.btn-close{background:#c0392b;color:#fff;border:none;width:34px;height:34px;min-width:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:0.95rem;line-height:1;z-index:1000;padding:0}
 .btn-close:hover{opacity:0.95}
 .modal-content{position:relative}
-.btn-close{position:absolute;top:8px;right:8px}
+/* Place close button inside the header so it doesn't overlap the title */
+.modal-header .btn-close { margin-left: auto; position: static; width:34px; height:34px; font-size:0.95rem; align-self:center; }
 .install-group{display:flex;align-items:center;gap:6px}
 .upload-progress{display:none;width:180px;margin-left:8px;height:12px;border-radius:6px}
 .install-activate{display:flex;align-items:center;gap:4px;font-size:0.85em;color:#ccc}

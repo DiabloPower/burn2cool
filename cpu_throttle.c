@@ -32,7 +32,7 @@
 // Additional runtime config path for system use
 #define VARLIB_CONFIG "/var/lib/cpu_throttle/cpu_throttle.conf"
 #define DEFAULT_WEB_PORT 8086  // Intel 8086 tribute!
-#define DAEMON_VERSION "4.0"
+#define DAEMON_VERSION "4.1"
 #define THROTTLE_START_OFFSET 30  // Start throttling 30°C below temp_max
 #define HYSTERESIS 3              // °C hysteresis
 #define POLL_TIMEOUT_MS 250       // Poll timeout in ms
@@ -61,6 +61,9 @@ volatile sig_atomic_t should_exit = 0; // flag for graceful shutdown
 volatile sig_atomic_t should_restart = 0; // request restart by exec-ing self
 int thermal_zone = -1; // thermal zone number (-1 = auto-detect, prefer zone 0 if CPU)
 int use_avg_temp = 0; // use average temperature from CPU thermal zones
+int use_hwmon = 0; // whether a hwmon sensor is used (preferred over thermal zones)
+int sensor_auto = 1; // whether the sensor is in auto-detect mode (true) or a saved explicit path (false)
+char sensor_source[16] = "auto"; /* 'auto'|'hwmon'|'thermal' - the user's preferred sensor source when in auto mode */
 int last_throttle_temp = 0; // hysteresis for throttling
 
 /* System-wide skins directory. Skins are installed system-wide by installer or
@@ -464,9 +467,18 @@ static void parse_config_fp(FILE *fp) {
                 safe_max = atoi(value);
                 LOG_VERBOSE("Config: safe_max = %d\n", safe_max);
             } else if (strcmp(key, "sensor") == 0) {
-                snprintf(temp_path, sizeof(temp_path), "%s", value);
-                temp_path[sizeof(temp_path) - 1] = '\0';
-                LOG_VERBOSE("Config: sensor = %s\n", temp_path);
+                // allow 'auto' to indicate auto-detection (prefer HWMon then thermal)
+                if (strcmp(value, "auto") == 0 || strcmp(value, "detect") == 0) {
+                    sensor_auto = 1;
+                    thermal_zone = -1; // auto-detect
+                    snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone0/temp");
+                    LOG_VERBOSE("Config: sensor=auto (enable auto-detection)\n");
+                } else {
+                    sensor_auto = 0;
+                    snprintf(temp_path, sizeof(temp_path), "%s", value);
+                    temp_path[sizeof(temp_path) - 1] = '\0';
+                    LOG_VERBOSE("Config: sensor = %s\n", temp_path);
+                }
             } else if (strcmp(key, "thermal_zone") == 0) {
                 int val = atoi(value);
                 if (val >= -1 && val <= 100) {
@@ -497,6 +509,15 @@ static void parse_config_fp(FILE *fp) {
             } else if (strcmp(key, "excluded_types") == 0) {
                 snprintf(excluded_types_config, sizeof(excluded_types_config), "%s", value);
                 LOG_VERBOSE("Config: excluded_types = %s\n", excluded_types_config);
+            } else if (strcmp(key, "sensor_source") == 0) {
+                if (strcmp(value, "hwmon") == 0 || strcmp(value, "thermal") == 0 || strcmp(value, "auto") == 0) {
+                    /* value validated, copy safely */
+                    strncpy(sensor_source, value, sizeof(sensor_source) - 1);
+                    sensor_source[sizeof(sensor_source) - 1] = '\0';
+                    LOG_VERBOSE("Config: sensor_source = %s\n", sensor_source);
+                } else {
+                    LOG_VERBOSE("Config: sensor_source '%s' invalid, ignoring\n", value);
+                }
             } else {
                 LOG_VERBOSE("Config: Unknown key '%s' at line %d\n", key, line_num);
             }
@@ -614,7 +635,8 @@ int save_config_file() {
     fprintf(fp, "temp_max=%d\n", temp_max);
     fprintf(fp, "safe_min=%d\n", safe_min);
     fprintf(fp, "safe_max=%d\n", safe_max);
-    fprintf(fp, "sensor=%s\n", temp_path);
+    if (sensor_auto) fprintf(fp, "sensor=auto\n"); else fprintf(fp, "sensor=%s\n", temp_path);
+    fprintf(fp, "sensor_source=%s\n", sensor_source);
     fprintf(fp, "thermal_zone=%d\n", thermal_zone);
     fprintf(fp, "avg_temp=%d\n", use_avg_temp);
     fprintf(fp, "web_port=%d\n", web_port);
@@ -931,7 +953,9 @@ void build_skins_json(char *buf, size_t bufsz) {
 }
 
 int read_avg_cpu_temp(void);
+int read_avg_hwmon_temp(void);
 int detect_cpu_thermal_zone(void);
+int detect_hwmon_sensor(char *out_path, size_t out_sz);
 void set_thermal_zone_path(int zone);
 // Decide which thermal zone types should be excluded from average calculations
 static int is_excluded_thermal_type(const char *lower_type) {
@@ -961,6 +985,7 @@ static int is_excluded_thermal_type(const char *lower_type) {
 
 int read_temp() {
     if (use_avg_temp) {
+        if (use_hwmon) return read_avg_hwmon_temp();
         return read_avg_cpu_temp();
     }
     FILE *fp = fopen(temp_path, "r");
@@ -1243,6 +1268,9 @@ void build_status_json(char *buffer, size_t size) {
     if (pw) snprintf(uname, sizeof(uname), "%s", pw->pw_name);
     else snprintf(uname, sizeof(uname), "uid:%d", (int)uid);
 
+    char sensor_out[512];
+    /* Show actual temp_path when using HWMon or when an explicit sensor path is set. Otherwise report 'auto'. */
+    if (sensor_auto && !use_hwmon) snprintf(sensor_out, sizeof(sensor_out), "auto"); else snprintf(sensor_out, sizeof(sensor_out), "%s", temp_path);
     snprintf(buffer, size,
              "{"
              "\"temperature\":%d,"
@@ -1251,11 +1279,15 @@ void build_status_json(char *buffer, size_t size) {
              "\"safe_max\":%d,"
              "\"temp_max\":%d,"
              "\"sensor\":\"%s\","
+             "\"temp_sensor\":\"%s\","
+             "\"effective_sensor\":\"%s\","
+             "\"sensor_source\":\"%s\","
+             "\"use_hwmon\":%s,"
              "\"thermal_zone\":%d,"
              "\"use_avg_temp\":%s,"
             "\"running_user\":\"%s\",\"web_port\":%d"
              "}",
-             current_temp, current_freq, safe_min, safe_max, temp_max, temp_path, thermal_zone, use_avg_temp ? "true" : "false", uname, web_port);
+             current_temp, current_freq, safe_min, safe_max, temp_max, sensor_out, sensor_out, temp_path, sensor_source, use_hwmon ? "true" : "false", thermal_zone, use_avg_temp ? "true" : "false", uname, web_port);
 }
 
 void build_metrics_json(char *buffer, size_t size) {
@@ -1327,34 +1359,87 @@ void build_zones_json(char *buffer, size_t size) {
                 if (copy_len >= sizeof(zones[zcount].type)) copy_len = sizeof(zones[zcount].type)-1;
                 memcpy(zones[zcount].type, type, copy_len);
                 zones[zcount].type[copy_len] = '\0';
-                zones[zcount].temp_c = temp_c;
-                // mark excluded by negating temp to -100 to signal it for JSON (special value)
-                if (excluded) zones[zcount].temp_c = -12345;
+                // store temp and mark excluded by sentinel value
+                zones[zcount].temp_c = excluded ? -12345 : temp_c;
                 zcount++;
             }
         }
     }
     closedir(dir);
     // Sort zones by zone number
-    if (zcount > 1) {
-        extern int zone_entry_cmp(const void *a, const void *b);
-        qsort(zones, zcount, sizeof(zones[0]), zone_entry_cmp);
-    }
+    if (zcount > 1) qsort(zones, zcount, sizeof(zones[0]), zone_entry_cmp);
     // Build JSON
-    buf += snprintf(buf, remaining, "{\"zones\":[");
-    remaining -= (buf - buffer);
-    for (int i = 0; i < zcount; ++i) {
-        if (i > 0) { buf += snprintf(buf, remaining, ","); remaining -= (buf - buffer); }
-        int excluded = (zones[i].temp_c == -12345);
-        int temp_val = excluded ? -1 : zones[i].temp_c;
-        if (excluded) {
-            buf += snprintf(buf, remaining, "{\"zone\":%d,\"type\":\"%s\",\"temp\":null,\"excluded\":true}", zones[i].zone_num, zones[i].type);
+    int used = snprintf(buf, remaining, "{\"zones\":[");
+    for (int i = 0; i < zcount && remaining > 10; i++) {
+        int excluded_flag = (zones[i].temp_c == -12345);
+        int temp_val = excluded_flag ? -1 : zones[i].temp_c;
+        if (i != 0) { used += snprintf(buf + used, remaining - used, ","); }
+        if (excluded_flag) {
+            used += snprintf(buf + used, remaining - used, "{\"zone\":%d,\"type\":\"%s\",\"temp\":null,\"excluded\":true}", zones[i].zone_num, zones[i].type);
         } else {
-            buf += snprintf(buf, remaining, "{\"zone\":%d,\"type\":\"%s\",\"temp\":%d,\"excluded\":false}", zones[i].zone_num, zones[i].type, temp_val);
+            used += snprintf(buf + used, remaining - used, "{\"zone\":%d,\"type\":\"%s\",\"temp\":%d,\"excluded\":false}", zones[i].zone_num, zones[i].type, temp_val);
         }
-        remaining -= (buf - buffer);
     }
-    buf += snprintf(buf, remaining, "]}");
+    used += snprintf(buf + used, remaining - used, "]}");
+    if (used >= (int)size) snprintf(buffer, size, "{\"zones\":[]}");
+}
+
+void build_hwmons_json(char *buffer, size_t size) {
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (!dir) { snprintf(buffer, size, "{\"hwmons\":[]}"); return; }
+    struct dirent *entry;
+    char *buf = buffer;
+    size_t remaining = size - 1;
+    int used = 0;
+    used += snprintf(buf + used, remaining - used, "{\"hwmons\":[");
+    int first_dev = 1;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char hwmon_base[512]; snprintf(hwmon_base, sizeof(hwmon_base), "/sys/class/hwmon/%s", entry->d_name);
+        char namebuf[256] = "";
+        char name_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+        snprintf(name_path, sizeof(name_path), "%s/name", hwmon_base);
+#pragma GCC diagnostic pop
+        FILE *np = fopen(name_path, "r"); if (np) { if (fgets(namebuf, sizeof(namebuf), np)) namebuf[strcspn(namebuf, "\n")] = 0; fclose(np); }
+        // collect sensors
+        DIR *hdir = opendir(hwmon_base);
+        if (!hdir) continue;
+        struct dirent *he;
+        int first_sensor = 1;
+        char devbuf[2048]; int devused = 0;
+        devused += snprintf(devbuf + devused, sizeof(devbuf) - devused, "{\"id\":\"%s\",\"name\":\"%s\",\"sensors\":[", entry->d_name, namebuf);
+        while ((he = readdir(hdir)) != NULL) {
+            if (strncmp(he->d_name, "temp", 4) == 0 && strstr(he->d_name, "_input")) {
+                char label_name[64]; snprintf(label_name, sizeof(label_name), "%.*s", (int)sizeof(label_name)-1, he->d_name);
+                char *p = strstr(label_name, "_input"); if (p) strcpy(p, "_label");
+                char temp_input_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                snprintf(temp_input_path, sizeof(temp_input_path), "%s/%s", hwmon_base, he->d_name);
+                char label_path[512]; snprintf(label_path, sizeof(label_path), "%s/%s", hwmon_base, label_name);
+#pragma GCC diagnostic pop
+                char labelbuf[256] = ""; FILE *lf = fopen(label_path, "r"); if (lf) { if (fgets(labelbuf, sizeof(labelbuf), lf)) labelbuf[strcspn(labelbuf, "\n")] = 0; fclose(lf); }
+                int temp_c = -1; FILE *tf = fopen(temp_input_path, "r"); if (tf) { long tr; if (fscanf(tf, "%ld", &tr) == 1) temp_c = (int)(tr / 1000); fclose(tf); }
+                // check excluded
+                char lower[1024]; snprintf(lower, sizeof(lower), "%s %s", namebuf, labelbuf); for (char *q = lower; *q; ++q) *q = tolower(*q);
+                int excluded = 0; if (excluded_types_config[0]) { char tmp[512]; snprintf(tmp, sizeof(tmp), "%s", excluded_types_config); char *tok = strtok(tmp, ","); while (tok) { if (strstr(lower, tok)) { excluded = 1; break; } tok = strtok(NULL, ","); } }
+                if (!first_sensor) devused += snprintf(devbuf + devused, sizeof(devbuf) - devused, ",");
+                devused += snprintf(devbuf + devused, sizeof(devbuf) - devused, "{\"id\":\"%s\",\"label\":\"%s\",\"path\":\"%s\",\"temp\":%d,\"excluded\":%s}", he->d_name, labelbuf, temp_input_path, temp_c, excluded ? "true" : "false");
+                first_sensor = 0;
+            }
+        }
+        closedir(hdir);
+        devused += snprintf(devbuf + devused, sizeof(devbuf) - devused, "]}");
+        if (!first_dev) used += snprintf(buf + used, remaining - used, ",");
+        used += snprintf(buf + used, remaining - used, "%s", devbuf);
+        first_dev = 0;
+        if (used >= (int)remaining - 100) break; // safety
+    }
+    closedir(dir);
+    used += snprintf(buf + used, remaining - used, "]}");
+    if (used >= (int)size) snprintf(buffer, size, "{\"hwmons\":[]}");
 }
 
 void build_limits_json(char *buffer, size_t size) {
@@ -1846,6 +1931,12 @@ void handle_http_request(int client_fd, const char *request) {
         build_zones_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
     }
+    else if (strcmp(path, "/api/hwmons") == 0 && strcmp(method, "GET") == 0) {
+        LOG_VERBOSE("API: /api/hwmons requested\n");
+        build_hwmons_json(response, sizeof(response));
+        LOG_VERBOSE("API: /api/hwmons response len=%zu\n", strlen(response));
+        send_http_response(client_fd, "200 OK", "application/json", response);
+    }
     else if (strcmp(path, "/api/skins") == 0 && strcmp(method, "GET") == 0) {
         build_skins_json(response, sizeof(response));
         send_http_response(client_fd, "200 OK", "application/json", response);
@@ -2219,9 +2310,124 @@ void handle_http_request(int client_fd, const char *request) {
                     }
                     save_config_file();
                     snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone%d/temp", thermal_zone);
+                    use_hwmon = 0; /* manual thermal zone overrides HWMon auto-selection */
+                    sensor_auto = 0; /* explicit thermal_zone counts as explicit sensor selection */
                     snprintf(response, sizeof(response), "{\"status\":\"ok\",\"thermal_zone\":%d}", thermal_zone);
                 } else {
                     snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"thermal_zone must be -1 (auto) or 0-100\"}");
+                }
+            }
+            else if (strcmp(setting, "sensor") == 0) {
+                // parse string value {"value":"/sys/class/..."} or {"value":"auto"}
+                char valbuf[512] = {0};
+                const char *vpos = strstr(body_start, "\"value\"");
+                if (vpos) {
+                    const char *colon = strchr(vpos, ':');
+                    if (colon) {
+                        const char *p = colon + 1;
+                        while (*p && isspace((unsigned char)*p)) p++;
+                        if (*p == '"') {
+                            const char *start_q = p + 1;
+                            const char *end_q = strchr(start_q, '"');
+                            if (end_q) {
+                                size_t len = end_q - start_q;
+                                if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                                memcpy(valbuf, start_q, len);
+                                valbuf[len] = '\0';
+                            }
+                        } else {
+                            const char *start = p;
+                            while (*start && isspace((unsigned char)*start)) start++;
+                            const char *end = start;
+                            while (*end && !isspace((unsigned char)*end) && *end != ',' && *end != '}') end++;
+                            size_t len = end - start;
+                            if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                            memcpy(valbuf, start, len);
+                            valbuf[len] = '\0';
+                        }
+                    }
+                }
+                if (!valbuf[0]) {
+                    snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"invalid sensor payload\"}");
+                } else {
+                    for (char *p = valbuf; *p; ++p) *p = tolower((unsigned char)*p);
+                    if (strcmp(valbuf, "auto") == 0 || strcmp(valbuf, "detect") == 0) {
+                        sensor_auto = 1;
+                        thermal_zone = -1;
+                        snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone0/temp");
+                        use_hwmon = 0;
+                        int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor\":\"auto\",\"saved\":true,\"saved_to\":\"%s\"}", saved_config_path);
+                        else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor\":\"auto\",\"saved\":false,\"message\":\"failed to write config\"}");
+                    } else {
+                        // explicit path
+                        sensor_auto = 0;
+                        snprintf(temp_path, sizeof(temp_path), "%s", valbuf);
+                        temp_path[sizeof(temp_path)-1] = '\0';
+                        use_hwmon = strstr(valbuf, "/hwmon/") ? 1 : 0;
+                        int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor\":\"%s\",\"saved\":true,\"saved_to\":\"%s\"}", temp_path, saved_config_path);
+                        else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor\":\"%s\",\"saved\":false,\"message\":\"failed to write config\"}", temp_path);
+                    }
+                }
+            }
+            else if (strcmp(setting, "sensor-source") == 0) {
+                // parse string value {"value":"auto"|"hwmon"|"thermal"}
+                char valbuf[64] = {0};
+                const char *vpos = strstr(body_start, "\"value\"");
+                if (vpos) {
+                    const char *colon = strchr(vpos, ':');
+                    if (colon) {
+                        const char *p = colon + 1;
+                        while (*p && isspace((unsigned char)*p)) p++;
+                        if (*p == '"') {
+                            const char *start_q = p + 1;
+                            const char *end_q = strchr(start_q, '"');
+                            if (end_q) {
+                                size_t len = end_q - start_q;
+                                if (len >= sizeof(valbuf)) len = sizeof(valbuf) - 1;
+                                memcpy(valbuf, start_q, len);
+                                valbuf[len] = '\0';
+                            }
+                        }
+                    }
+                }
+                if (!valbuf[0]) {
+                    snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"invalid sensor-source payload\"}");
+                } else {
+                    for (char *p = valbuf; *p; ++p) *p = tolower((unsigned char)*p);
+                    if (strcmp(valbuf, "auto") == 0 || strcmp(valbuf, "hwmon") == 0 || strcmp(valbuf, "thermal") == 0) {
+                        /* valbuf validated earlier; copy safely */
+                        strncpy(sensor_source, valbuf, sizeof(sensor_source) - 1);
+                        sensor_source[sizeof(sensor_source) - 1] = '\0';
+                        // Adjust detection behavior immediately when user forces a source
+                        sensor_auto = 1; // keep auto for path, but prefer source
+                        if (strcmp(sensor_source, "hwmon") == 0) {
+                            // try to pick a hwmon sensor now if available
+                            char detected[512] = "";
+                            if (detect_hwmon_sensor(detected, sizeof(detected)) == 0) {
+                                snprintf(temp_path, sizeof(temp_path), "%s", detected);
+                                use_hwmon = 1;
+                            } else {
+                                use_hwmon = 0;
+                            }
+                        } else if (strcmp(sensor_source, "thermal") == 0) {
+                            int tz = detect_cpu_thermal_zone();
+                            if (tz >= 0) {
+                                thermal_zone = tz;
+                                snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone%d/temp", tz);
+                            }
+                            use_hwmon = 0;
+                        } else {
+                            // auto - let existing detection choose
+                            use_hwmon = 0; // will be adjusted by the next sampling/detect cycle
+                        }
+                        int sr = save_config_file();
+                        if (sr == 0) snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor_source\":\"%s\",\"saved\":true,\"saved_to\":\"%s\"}", sensor_source, saved_config_path);
+                        else snprintf(response, sizeof(response), "{\"status\":\"ok\",\"sensor_source\":\"%s\",\"saved\":false,\"message\":\"failed to write config\"}", sensor_source);
+                    } else {
+                        snprintf(response, sizeof(response), "{\"status\":\"error\",\"message\":\"invalid sensor_source value\"}");
+                    }
                 }
             }
             else if (strcmp(setting, "excluded-types") == 0) {
@@ -2436,17 +2642,77 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                         snprintf(response, sizeof(response), "OK: temp_max set to %d°C\n", temp_max);
                     }
                 }
-                else if (strcmp(cmd, "set-thermal-zone") == 0 && sscanf(arg, "%d", &thermal_zone) == 1) {
-                    if (thermal_zone < -1 || thermal_zone > 100) {
-                        snprintf(response, sizeof(response), "ERROR: thermal_zone must be -1 (auto) or 0-100\n");
+                else if (strcmp(cmd, "set-sensor-source") == 0) {
+                    if (arg[0] == '\0' || (strcmp(arg, "auto") != 0 && strcmp(arg, "hwmon") != 0 && strcmp(arg, "thermal") != 0)) {
+                        snprintf(response, sizeof(response), "ERROR: set-sensor-source requires one of: auto, hwmon, thermal\n");
                     } else {
-                        if (thermal_zone == -1) {
-                            int detected = detect_cpu_thermal_zone();
-                            thermal_zone = detected;
-                        }
-                        set_thermal_zone_path(thermal_zone);
+                        snprintf(sensor_source, sizeof(sensor_source), "%s", arg);
+                        sensor_source[sizeof(sensor_source)-1] = '\0';
+                        /* Update use_hwmon flag as a convenience (doesn't override explicit sensor path) */
+                        if (strcmp(sensor_source, "hwmon") == 0) use_hwmon = 1;
+                        else use_hwmon = 0;
                         save_config_file();
-                        snprintf(response, sizeof(response), "OK: thermal_zone set to %d\n", thermal_zone);
+                        snprintf(response, sizeof(response), "OK: sensor_source set to %s\n", sensor_source);
+                    }
+                }
+                else if (strcmp(cmd, "set-sensor") == 0) {
+                    if (arg[0] == '\0') {
+                        snprintf(response, sizeof(response), "ERROR: set-sensor requires an argument (path or 'auto' or 'list')\n");
+                    } else if (strcmp(arg, "list") == 0) {
+                        /* Reuse sensors command behavior to return a JSON listing */
+                        char hw[8192] = {0}; char zn[8192] = {0};
+                        build_hwmons_json(hw, sizeof(hw)); build_zones_json(zn, sizeof(zn));
+                        char *ha = strchr(hw, '['); char *hb = strrchr(hw, ']');
+                        char *za = strchr(zn, '['); char *zb = strrchr(zn, ']');
+                        char *big = malloc(16384);
+                        if (big) {
+                            if (ha && hb && za && zb && hb > ha && zb > za) {
+                                int hlen = (int)(hb - ha + 1);
+                                int zlen = (int)(zb - za + 1);
+                                char *har = malloc(hlen + 1);
+                                char *zar = malloc(zlen + 1);
+                                if (har && zar) {
+                                    memcpy(har, ha, hlen); har[hlen] = '\0';
+                                    memcpy(zar, za, zlen); zar[zlen] = '\0';
+                                    snprintf(big, 16384, "{\"hwmons\":%s,\"zones\":%s}", har, zar);
+                                    free(har);
+                                    free(zar);
+                                } else {
+                                    snprintf(big, 16384, "{\"hwmons_json\":%s,\"zones_json\":%s}", hw, zn);
+                                    if (har) free(har);
+                                    if (zar) free(zar);
+                                }
+                            } else {
+                                snprintf(big, 16384, "{\"hwmons_json\":%s,\"zones_json\":%s}", hw, zn);
+                            }
+                            /* Ensure the entire buffer is sent */
+                            size_t to_send = strlen(big); size_t sent = 0;
+                            while (sent < to_send) {
+                                ssize_t sv = send(client_fd, big + sent, (ssize_t)(to_send - sent), 0);
+                                if (sv <= 0) break;
+                                sent += (size_t)sv;
+                            }
+                            free(big);
+                            close(client_fd);
+                            continue;
+                        } else {
+                            snprintf(response, sizeof(response), "ERROR: failed to allocate response buffer\n");
+                        }
+                    } else if (strcmp(arg, "auto") == 0 || strcmp(arg, "detect") == 0) {
+                        sensor_auto = 1;
+                        thermal_zone = -1;
+                        snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone0/temp");
+                        use_hwmon = 0;
+                        save_config_file();
+                        snprintf(response, sizeof(response), "OK: sensor reset to auto\n");
+                    } else {
+                        sensor_auto = 0;
+                        snprintf(temp_path, sizeof(temp_path), "%s", arg);
+                        temp_path[sizeof(temp_path)-1] = '\0';
+                        use_hwmon = strstr(arg, "/hwmon/") ? 1 : 0;
+                        save_config_file();
+                        /* ensure temp_path doesn't overflow response */
+                        snprintf(response, sizeof(response), "OK: sensor set to %.*s\n", (int)sizeof(response)-20, temp_path);
                     }
                 }
                 else if (strcmp(cmd, "set-use-avg-temp") == 0 && sscanf(arg, "%d", &use_avg_temp) == 1) {
@@ -2486,6 +2752,68 @@ void handle_socket_commands(int *current_temp, int *current_freq, int min_freq, 
                 }
                 else if (strcmp(cmd, "zones") == 0) {
                     build_zones_json(response, sizeof(response));
+                }
+                else if (strcmp(cmd, "sensors") == 0) {
+                    /* Return combined HWMon and thermal zone lists -- send as a large response and close the connection */
+                    char hw[8192] = {0}; char zn[8192] = {0};
+                    build_hwmons_json(hw, sizeof(hw));
+                    build_zones_json(zn, sizeof(zn));
+                    char *ha = strchr(hw, '['); char *hb = strrchr(hw, ']');
+                    char *za = strchr(zn, '['); char *zb = strrchr(zn, ']');
+                    char *big = malloc(16384);
+                    if (big) {
+                        if (ha && hb && za && zb && hb > ha && zb > za) {
+                            int hlen = (int)(hb - ha + 1);
+                            int zlen = (int)(zb - za + 1);
+                            char *har = malloc(hlen + 1);
+                            char *zar = malloc(zlen + 1);
+                            if (har && zar) {
+                                memcpy(har, ha, hlen); har[hlen] = '\0';
+                                memcpy(zar, za, zlen); zar[zlen] = '\0';
+                                snprintf(big, 16384, "{\"hwmons\":%s,\"zones\":%s}", har, zar);
+                                free(har);
+                                free(zar);
+                            } else {
+                                snprintf(big, 16384, "{\"hwmons_json\":%s,\"zones_json\":%s}", hw, zn);
+                                if (har) free(har);
+                                if (zar) free(zar);
+                            }
+                        } else {
+                            snprintf(big, 16384, "{\"hwmons_json\":%s,\"zones_json\":%s}", hw, zn);
+                        }
+                        /* Ensure the entire buffer is sent */
+                        size_t to_send = strlen(big); size_t sent = 0;
+                        while (sent < to_send) {
+                            ssize_t sv = send(client_fd, big + sent, (ssize_t)(to_send - sent), 0);
+                            if (sv <= 0) break;
+                            sent += (size_t)sv;
+                        }
+                        free(big);
+                        close(client_fd);
+                        continue; /* skip sending the default small response */
+                    } else {
+                        /* Fallback to small response buffer if malloc failed */
+                        if (ha && hb && za && zb && hb > ha && zb > za) {
+                            int hlen = (int)(hb - ha + 1);
+                            int zlen = (int)(zb - za + 1);
+                            char har[4096]; char zar[4096];
+                            if (hlen >= (int)sizeof(har)) hlen = sizeof(har)-1;
+                            if (zlen >= (int)sizeof(zar)) zlen = sizeof(zar)-1;
+                            memcpy(har, ha, hlen); har[hlen] = '\0';
+                            memcpy(zar, za, zlen); zar[zlen] = '\0';
+                            /* If the combined payload fits in response, use it; otherwise send an error to avoid truncation */
+                            if ((size_t)hlen + (size_t)zlen + 64 < sizeof(response)) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                                snprintf(response, sizeof(response), "{\"hwmons\":%s,\"zones\":%s}", har, zar);
+#pragma GCC diagnostic pop
+                            } else {
+                                snprintf(response, sizeof(response), "{\"error\":\"sensors payload too large\"}");
+                            }
+                        } else {
+                            snprintf(response, sizeof(response), "{\"hwmons_json\":%s,\"zones_json\":%s}", hw, zn);
+                        }
+                    }
                 }
                 else if (strcmp(cmd, "quit") == 0) {
                     should_exit = 1;
@@ -2842,6 +3170,72 @@ int read_avg_cpu_temp() {
     return avg;
 }
 
+// Average over hwmon sensors (exclude devices matching excluded_types_config)
+int read_avg_hwmon_temp(void) {
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (!dir) return -1;
+    struct dirent *entry;
+    int total_temp = 0;
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char hwmon_base[512]; snprintf(hwmon_base, sizeof(hwmon_base), "/sys/class/hwmon/%s", entry->d_name);
+        // read device name if available
+        char namebuf[256] = "";
+        char name_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+        snprintf(name_path, sizeof(name_path), "%s/name", hwmon_base);
+#pragma GCC diagnostic pop
+        FILE *np = fopen(name_path, "r");
+        if (np) { if (fgets(namebuf, sizeof(namebuf), np)) namebuf[strcspn(namebuf, "\n")] = 0; fclose(np); }
+        // iterate temp*_input
+        DIR *hdir = opendir(hwmon_base);
+        if (!hdir) continue;
+        struct dirent *he;
+        while ((he = readdir(hdir)) != NULL) {
+            if (strncmp(he->d_name, "temp", 4) == 0 && strstr(he->d_name, "_input")) {
+                char label_name[64]; snprintf(label_name, sizeof(label_name), "%.*s", (int)sizeof(label_name)-1, he->d_name);
+                char *p = strstr(label_name, "_input"); if (p) strcpy(p, "_label");
+                char temp_input_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                snprintf(temp_input_path, sizeof(temp_input_path), "%s/%s", hwmon_base, he->d_name);
+#pragma GCC diagnostic pop
+                char label_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                snprintf(label_path, sizeof(label_path), "%s/%s", hwmon_base, label_name);
+#pragma GCC diagnostic pop
+                char labelbuf[256] = "";
+                FILE *lf = fopen(label_path, "r"); if (lf) { if (fgets(labelbuf, sizeof(labelbuf), lf)) labelbuf[strcspn(labelbuf, "\n")] = 0; fclose(lf); }
+                // Check excluded types against lower-cased name or label
+                char lower[1024]; snprintf(lower, sizeof(lower), "%s %s", namebuf, labelbuf); for (char *q = lower; *q; ++q) *q = tolower(*q);
+                int excluded = 0; if (excluded_types_config[0]) { char tmp[512]; snprintf(tmp, sizeof(tmp), "%s", excluded_types_config); char *tok = strtok(tmp, ","); while (tok) { if (strstr(lower, tok)) { excluded = 1; break; } tok = strtok(NULL, ","); } }
+                if (excluded) continue;
+                FILE *tf = fopen(temp_input_path, "r");
+                if (tf) {
+                    long temp_raw;
+                    if (fscanf(tf, "%ld", &temp_raw) == 1) {
+                        int temp_c = (int)(temp_raw / 1000);
+                        if (temp_c > 0 && temp_c < 150) {
+                            total_temp += temp_c;
+                            count++;
+                        }
+                    }
+                    fclose(tf);
+                }
+            }
+        }
+        closedir(hdir);
+    }
+    closedir(dir);
+    if (count == 0) return -1;
+    int avg = total_temp / count;
+    if (use_avg_temp) avg -= 5;
+    return avg;
+}
+
 int detect_cpu_thermal_zone() {
     DIR *dir = opendir("/sys/class/thermal");
     if (!dir) {
@@ -2901,18 +3295,177 @@ int detect_cpu_thermal_zone() {
     }
 }
 
+// Detect a suitable HWMon sensor (prefer cpu/pkg/core labels or names); returns 0 and sets out_path on success
+int detect_hwmon_sensor(char *out_path, size_t out_sz) {
+    DIR *dir = opendir("/sys/class/hwmon");
+    if (!dir) return -1;
+    struct dirent *entry;
+    int found = 0;
+    char best_path[512] = "";
+    int best_score = -1;
+    long best_temp = -1000000;
+    const char *preferred_tokens[] = {"cpu","pkg","core","package","zen","intel","amd","coretemp","k10temp", NULL};
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char hwmon_base[512];
+        snprintf(hwmon_base, sizeof(hwmon_base), "/sys/class/hwmon/%s", entry->d_name);
+        // read name if available
+        char namebuf[256] = "";
+        char name_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+        snprintf(name_path, sizeof(name_path), "%s/name", hwmon_base);
+#pragma GCC diagnostic pop
+        FILE *np = fopen(name_path, "r");
+        if (np) {
+            if (fgets(namebuf, sizeof(namebuf), np)) namebuf[strcspn(namebuf, "\n")] = 0;
+            fclose(np);
+        }
+        DIR *hdir = opendir(hwmon_base);
+        if (!hdir) continue;
+        struct dirent *he;
+        while ((he = readdir(hdir)) != NULL) {
+            if (strncmp(he->d_name, "temp", 4) == 0 && strstr(he->d_name, "_input")) {
+                char label_name[64];
+                snprintf(label_name, sizeof(label_name), "%.*s", (int)sizeof(label_name)-1, he->d_name);
+                char *p = strstr(label_name, "_input");
+                if (p) strcpy(p, "_label");
+                char temp_input_path[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                snprintf(temp_input_path, sizeof(temp_input_path), "%s/%s", hwmon_base, he->d_name);
+                char label_path[512];
+                snprintf(label_path, sizeof(label_path), "%s/%s", hwmon_base, label_name);
+#pragma GCC diagnostic pop
+                char labelbuf[256] = "";
+                FILE *lf = fopen(label_path, "r");
+                if (lf) {
+                    if (fgets(labelbuf, sizeof(labelbuf), lf)) labelbuf[strcspn(labelbuf, "\n")] = 0;
+                    fclose(lf);
+                }
+                // Build lowercased search buffer
+                char lower[1024];
+                snprintf(lower, sizeof(lower), "%s %s %s", entry->d_name, namebuf, labelbuf);
+                for (char *q = lower; *q; ++q) *q = tolower(*q);
+                int score = 0;
+                for (const char **tk = preferred_tokens; *tk; ++tk) {
+                    if (strstr(lower, *tk)) score += 10;
+                }
+                // read current temp as tie-breaker
+                long temp_raw = -1000000;
+                FILE *tf = fopen(temp_input_path, "r");
+                if (tf) {
+                    if (fscanf(tf, "%ld", &temp_raw) != 1) temp_raw = -1000000;
+                    fclose(tf);
+                }
+                if (score > best_score || (score == best_score && temp_raw > best_temp)) {
+                    best_score = score;
+                    best_temp = temp_raw;
+                    strncpy(best_path, temp_input_path, sizeof(best_path));
+                    found = 1;
+                }
+            }
+        }
+        closedir(hdir);
+    }
+    closedir(dir);
+    if (found) {
+        snprintf(out_path, out_sz, "%s", best_path);
+        return 0;
+    }
+    return -1;
+}
+
 void set_thermal_zone_path(int zone) {
     if (zone < 0) return;
     snprintf(temp_path, sizeof(temp_path), "/sys/class/thermal/thermal_zone%d/temp", zone);
     LOG_VERBOSE("Using thermal zone %d: %s\n", zone, temp_path);
 }
 
+/* Print available HWMon sensors and thermal zones to stdout (human readable) */
+void print_available_sensors() {
+    printf("Available sensors:\n\n");
+    DIR *d = opendir("/sys/class/hwmon");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char hwbase[256];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(hwbase, sizeof(hwbase), "/sys/class/hwmon/%s", e->d_name);
+#pragma GCC diagnostic pop
+            char namepath[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(namepath, sizeof(namepath), "%s/name", hwbase);
+#pragma GCC diagnostic pop
+            char devname[128] = "(unknown)";
+            FILE *nf = fopen(namepath, "r");
+            if (nf) { if (fgets(devname, sizeof(devname), nf)) devname[strcspn(devname, "\n")] = 0; fclose(nf); }
+            printf("HWMon %s: %s\n", e->d_name, devname);
+            DIR *h = opendir(hwbase);
+            if (h) {
+                struct dirent *he;
+                while ((he = readdir(h)) != NULL) {
+                    if (strncmp(he->d_name, "temp", 4) == 0 && strstr(he->d_name, "_input")) {
+                        char label_name[64]; snprintf(label_name, sizeof(label_name), "%.*s", (int)sizeof(label_name)-1, he->d_name);
+                        char *p = strstr(label_name, "_input"); if (p) strcpy(p, "_label");
+                        char temp_input_path[512]; snprintf(temp_input_path, sizeof(temp_input_path), "%s/%s", hwbase, he->d_name);
+                        char label_path[512]; snprintf(label_path, sizeof(label_path), "%s/%s", hwbase, label_name);
+                        char labelbuf[256] = "";
+                        FILE *lf = fopen(label_path, "r");
+                        if (lf) { if (fgets(labelbuf, sizeof(labelbuf), lf)) labelbuf[strcspn(labelbuf, "\n")] = 0; fclose(lf); }
+                        long temp_raw = -1000000; FILE *tf = fopen(temp_input_path, "r"); if (tf) { if (fscanf(tf, "%ld", &temp_raw) != 1) temp_raw = -1000000; fclose(tf); }
+                        char temp_str[64] = "(no reading)";
+                        if (temp_raw != -1000000) {
+                            if (temp_raw > 1000 || temp_raw < -1000) snprintf(temp_str, sizeof(temp_str), "%ld°C", temp_raw/1000);
+                            else snprintf(temp_str, sizeof(temp_str), "%ld°C", temp_raw);
+                        }
+                        printf("  %s (%s): %s — %s\n", he->d_name, labelbuf[0]?labelbuf:"(no label)", temp_input_path, temp_str);
+                    }
+                }
+                closedir(h);
+            }
+            printf("\n");
+        }
+        closedir(d);
+    } else {
+        printf("No HWMon devices found.\n\n");
+    }
+    // thermal zones
+    DIR *td = opendir("/sys/class/thermal");
+    if (td) {
+        struct dirent *te;
+        while ((te = readdir(td)) != NULL) {
+            if (strncmp(te->d_name, "thermal_zone", 12) == 0) {
+                char tbase[256];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+                snprintf(tbase, sizeof(tbase), "/sys/class/thermal/%s", te->d_name);
+#pragma GCC diagnostic pop
+                char typepath[512]; snprintf(typepath, sizeof(typepath), "%s/type", tbase);
+                char temppath[512]; snprintf(temppath, sizeof(temppath), "%s/temp", tbase);
+                char tbuf[128] = ""; FILE *tf = fopen(typepath, "r"); if (tf) { if (fgets(tbuf, sizeof(tbuf), tf)) tbuf[strcspn(tbuf, "\n")] = 0; fclose(tf); }
+                long temp_raw = -1000000; FILE *tt = fopen(temppath, "r"); if (tt) { if (fscanf(tt, "%ld", &temp_raw) != 1) temp_raw = -1000000; fclose(tt); }
+                char tstr[64] = "(no reading)";
+                if (temp_raw != -1000000) { if (temp_raw > 1000 || temp_raw < -1000) snprintf(tstr, sizeof(tstr), "%ld°C", temp_raw/1000); else snprintf(tstr, sizeof(tstr), "%ld°C", temp_raw); }
+                printf("Thermal %s: %s — %s\n", te->d_name, tbuf[0]?tbuf:"(unknown)", tstr);
+            }
+        }
+        closedir(td);
+    }
+    printf("\n");
+}
+
 void print_help(const char *name) {
     printf("Usage: %s [OPTIONS]\n", name);
     printf("  --dry-run            Simulate frequency setting (no writes)\n");
     printf("  --log <path>         Append log messages to a file\n");
-    printf("  --sensor <path>      Manually specify temp sensor file\n");
-    printf("  --thermal-zone <num> Manually specify thermal zone number (0,1,2,...)\n");
+    printf("  --sensor [path|list]  Manually specify temp sensor file or use `list` to enumerate available sensors\n");
+    printf("                        (default: auto-detect HWMon then thermal-zone)\n");
+    printf("  --sensor-source <auto|hwmon|thermal>  Prefer sensor source (default: auto)\n");
     printf("  --avg-temp           Use average temperature from CPU thermal zones\n");
     printf("  --safe-min <freq>    Optional safe minimum frequency in kHz (e.g. 2000000)\n");
     printf("  --safe-max <freq>    Optional safe maximum frequency in kHz (e.g. 3000000)\n");
@@ -2924,11 +3477,13 @@ void print_help(const char *name) {
     printf("  --test               Run unit tests and exit\n");
     printf("  --help               Show this help message\n");
     printf("\nConfig file: %s (optional)\n", CONFIG_FILE);
-    printf("Supported keys: temp_max, safe_min, safe_max, sensor, thermal_zone, avg_temp, web_port\n");
+    printf("Supported keys: temp_max, safe_min, safe_max, sensor, sensor_source, avg_temp, web_port\n");
     printf("\nWeb Interface:\n");
     printf("  Use --web-port (without argument) for default port %d\n", DEFAULT_WEB_PORT);
     printf("  Use --web-port <port> for custom port (1024-65535)\n");
 }
+
+void print_available_sensors();
 
 int run_tests() {
     printf("Running unit tests...\n");
@@ -2983,12 +3538,22 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: Cannot open log file: %s\n", argv[i]);
                 return 1;
             }
-        } else if (strcmp(argv[i], "--sensor") == 0 && i + 1 < argc) {
-            snprintf(temp_path, sizeof(temp_path), "%s", argv[++i]);
-            temp_path[sizeof(temp_path)-1] = '\0';
-            temp_path[sizeof(temp_path) - 1] = '\0';
-        } else if (strcmp(argv[i], "--thermal-zone") == 0 && i + 1 < argc) {
-            thermal_zone = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--sensor") == 0) {
+            /* --sensor [path|list] : if next arg missing or is 'list' or next arg is another flag, list available sensors and exit */
+            if (i + 1 >= argc || argv[i+1][0] == '-' || strcmp(argv[i+1], "list") == 0) {
+                print_available_sensors();
+                return 0;
+            } else {
+                snprintf(temp_path, sizeof(temp_path), "%s", argv[++i]);
+                temp_path[sizeof(temp_path)-1] = '\0';
+            }
+        } else if (strcmp(argv[i], "--sensor-source") == 0 && i + 1 < argc) {
+            snprintf(sensor_source, sizeof(sensor_source), "%s", argv[++i]);
+            sensor_source[sizeof(sensor_source)-1] = '\0';
+            if (strcmp(sensor_source, "hwmon") != 0 && strcmp(sensor_source, "thermal") != 0 && strcmp(sensor_source, "auto") != 0) {
+                fprintf(stderr, "Error: --sensor-source must be one of: auto, hwmon, thermal\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--avg-temp") == 0) {
             use_avg_temp = 1;
         } else if (strcmp(argv[i], "--safe-min") == 0 && i + 1 < argc) {
@@ -3031,13 +3596,37 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Setup thermal zone
+    // Setup temp sensor (priority: explicit --sensor -> sensor_source -> HWMon -> thermal_zone)
     if (strcmp(temp_path, "/sys/class/thermal/thermal_zone0/temp") == 0) { // default not overridden by sensor
-        if (thermal_zone != -1) {
-            set_thermal_zone_path(thermal_zone);
+        char hwmon_path[512] = "";
+        if (strcmp(sensor_source, "hwmon") == 0) {
+            // User explicitly asked for HWMon; try to detect and use it, otherwise fall back to thermal
+            if (detect_hwmon_sensor(hwmon_path, sizeof(hwmon_path)) == 0) {
+                snprintf(temp_path, sizeof(temp_path), "%s", hwmon_path);
+                use_hwmon = 1;
+                LOG_VERBOSE("Sensor source 'hwmon' enforced: auto-detected %s\n", temp_path);
+            } else {
+                LOG_VERBOSE("Sensor source 'hwmon' requested but no hwmon found, falling back to thermal zones\n");
+                if (thermal_zone != -1) set_thermal_zone_path(thermal_zone);
+                else set_thermal_zone_path(detect_cpu_thermal_zone());
+                use_hwmon = 0;
+            }
+        } else if (strcmp(sensor_source, "thermal") == 0) {
+            // User explicitly asked for thermal zones; use configured zone if present
+            if (thermal_zone != -1) set_thermal_zone_path(thermal_zone);
+            else set_thermal_zone_path(detect_cpu_thermal_zone());
+            use_hwmon = 0;
         } else {
-            int detected_zone = detect_cpu_thermal_zone();
-            set_thermal_zone_path(detected_zone);
+            // Auto: prefer HWMon when available, otherwise respect configured thermal_zone or auto-detect it
+            if (detect_hwmon_sensor(hwmon_path, sizeof(hwmon_path)) == 0) {
+                snprintf(temp_path, sizeof(temp_path), "%s", hwmon_path);
+                use_hwmon = 1;
+                LOG_VERBOSE("Auto-detected HWMon sensor: %s\n", temp_path);
+            } else {
+                if (thermal_zone != -1) set_thermal_zone_path(thermal_zone);
+                else set_thermal_zone_path(detect_cpu_thermal_zone());
+                use_hwmon = 0;
+            }
         }
     }
 
@@ -3140,12 +3729,34 @@ int main(int argc, char *argv[]) {
             int max_freq = max_freq_limit;
             if (safe_max > 0 && safe_max < max_freq) max_freq = safe_max;
 
-            temp = read_temp();
-            if (temp < 0) {
-                LOG_ERROR("Failed to read CPU temperature\n");
-                cleanup_socket();
-                return 1;
+            // Runtime detection: if sensor is in auto mode prefer HWMon when available.
+            if (sensor_auto) {
+                if (strcmp(sensor_source, "thermal") == 0) {
+                    if (thermal_zone != -1) set_thermal_zone_path(thermal_zone);
+                    else set_thermal_zone_path(detect_cpu_thermal_zone());
+                    use_hwmon = 0;
+                } else {
+                    char hwmon_path[512] = "";
+                    if (detect_hwmon_sensor(hwmon_path, sizeof(hwmon_path)) == 0) {
+                        if (!use_hwmon || strcmp(temp_path, hwmon_path) != 0) {
+                            snprintf(temp_path, sizeof(temp_path), "%s", hwmon_path);
+                            use_hwmon = 1;
+                            LOG_VERBOSE("Runtime-detected HWMon sensor: %s\n", temp_path);
+                        }
+                    } else {
+                        if (thermal_zone != -1) set_thermal_zone_path(thermal_zone);
+                        else set_thermal_zone_path(detect_cpu_thermal_zone());
+                        use_hwmon = 0;
+                    }
+                }
             }
+            int new_read = read_temp();
+            if (new_read < 0) {
+                LOG_ERROR("Failed to read CPU temperature, will retry on next cycle\n");
+                // Skip throttle adjustment this cycle but keep daemon running
+                continue;
+            }
+            temp = new_read;
             current_temp = temp;
 
             int new_freq = max_freq;
