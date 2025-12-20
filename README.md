@@ -127,7 +127,6 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
                        (default: auto-detect; daemon prefers HWMon and falls back to thermal zones)
 --sensor-source <auto|hwmon|thermal>
                        Prefer a source type when auto-detecting sensors (default: auto)
---thermal-zone <num>   Specify thermal zone number (overrides auto-detection)
 --avg-temp             Use average temperature across CPU-related thermal zones
 --safe-min <freq>      Minimum frequency limit in kHz (e.g. 2000000)
 --safe-max <freq>      Maximum frequency limit in kHz (e.g. 3500000)
