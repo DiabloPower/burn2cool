@@ -21,7 +21,8 @@
       <div class='status-grid'>
         <div class='status-row'><div class='label'>Temperature</div><div class='value' id='temp'>--</div></div>
         <div class='status-row'><div class='label'>Frequency</div><div class='value' id='freq'>--</div></div>
-        <div class='status-row'><div class='label'>Thermal Zone</div><div class='value' id='zone'>--</div></div>
+        <div class='status-row'><div class='label'>Sensor Source</div><div class='value' id='sensor_source'>--</div></div>
+        <div class='status-row'><div class='label'>Sensor <span id='sensor'>--</span></div></div>
         <div class='status-row'><div class='label'>Use Avg Temp</div><div class='value' id='avg'>--</div></div>
         <div class='status-row'><div class='label'>Daemon user</div><div class='value' id='daemon_user'>--</div></div>
       </div>
@@ -60,12 +61,21 @@
       </div>
       <hr/>
       <div class='settings-grid'>
-        <div class='setting-row excluded'><input id='excludedTypes' type='text' placeholder='Excluded Types (e.g. INT3400,INT3402)'>
-        <button onclick='setSettingText("excluded-types",document.getElementById("excludedTypes").value)'>Set Excluded Types</button></div>
-        
-        <div class='setting-row'><label for='thermalZoneSelect'>Thermal Zone</label>
-        <select id='thermalZoneSelect' onchange='setSetting("thermal-zone", this.value)'></select></div>
-        <div class='setting-row avg-row'><button id='avgBtn' onclick='toggleAvgTemp()'>Use Avg Temp</button></div>
+        <!-- Sensor Source / Device controls moved into Settings (replaces excluded types + thermal zone UI) -->
+        <div class='setting-row sensor-controls'>
+          <div class='field'><label for='sensorGroupSelectMain'>Sensor Source</label>
+            <select id='sensorGroupSelectMain' class='profiles-select'></select></div>
+          <div class='field'><label for='hwmonSensorSelectMain'>Device</label>
+            <select id='hwmonSensorSelectMain' class='profiles-select'></select></div>
+        </div>
+
+        <div class='setting-row avg-row'>
+          <div class='avg-controls'>
+            <button id='avgBtn' onclick='toggleAvgTemp()'>Use Avg Temp</button>
+            <button id='sensorBtn' title='Manage excludes' class='sensor-btn' onclick='openExcludeModal()' aria-label='Exclude settings'>⚙</button>
+          </div>
+        </div>
+      </div>
       </div>
       <hr/>
       <div class='settings-grid restart-grid'>
@@ -76,6 +86,25 @@
       </div>
       </div>
     <div id='toast'></div>
+
+    <!-- Excludes modal: manage excluded sensors/devices (no source/device selection) -->
+    <div id='excludeModal' class='modal hidden'>
+      <div class='modal-overlay'></div>
+      <div class='modal-content'>
+        <div class='modal-header'>
+          <h3>Excluded Sensors / Devices</h3>
+          <button class='btn-close' onclick='closeExcludeModal()' aria-label='Close' title='Close'>×</button>
+        </div>
+        <div id='excludeModalContent'>Loading...</div>
+        <div class='modal-actions modal-actions-header'>
+          <div class='modal-actions-right'>
+            <button onclick='closeExcludeModal()' class='btn-secondary'>Cancel</button>
+            <button id='excludeModalSaveBtn' onclick='saveExcludeModal()' class='btn-enabled'>Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Floating button to open skins modal (non-intrusive floating action button) -->
     <div id='confirmModal' class='modal hidden'>
       <div class='modal-overlay'></div>
@@ -182,11 +211,58 @@
         fetch('/api/status').then(r=>r.json()).then(d=>{
           document.getElementById('temp').textContent=d.temperature+'°C';
           document.getElementById('freq').textContent=(d.frequency/1000).toFixed(0)+' MHz';
-          document.getElementById('zone').textContent=d.thermal_zone;
+          // Display sensor path (use effective_sensor when sensor is 'auto') and set tooltip to the full effective path.
+          const sensorEl = document.getElementById('sensor');
+          if (!d.sensor) {
+            sensorEl.innerHTML = '<span>--</span>'; sensorEl.removeAttribute('title'); sensorEl.classList.remove('truncated');
+          } else {
+            // Prefer to show effective sensor when available (helps 'auto' mode reveal the chosen sensor)
+            const showPath = (d.sensor === 'auto' && d.effective_sensor) ? d.effective_sensor : d.sensor;
+            // Display shorter form by hiding common sysfs prefixes and replacing with leading dots for clarity
+            let displayPath = String(showPath || '');
+            if (displayPath.indexOf('/sys/class/hwmon') === 0) displayPath = '...' + displayPath.slice('/sys/class/hwmon'.length);
+            else if (displayPath.indexOf('/sys/class/thermal') === 0) displayPath = '...' + displayPath.slice('/sys/class/thermal'.length);
+            const safe = String(displayPath).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            sensorEl.innerHTML = '<span>' + safe + '</span>';
+            // Keep full path in tooltip for copy/inspection
+            sensorEl.setAttribute('title', showPath);
+            // On narrow screens allow wrapping and do not use the RTL truncation (match breakpoint at 560px)
+            if (window.matchMedia && window.matchMedia('(max-width:560px)').matches) {
+              sensorEl.classList.remove('truncated');
+              // ensure the inner span allows wrapping
+              const span = sensorEl.querySelector('span'); if (span) { span.style.whiteSpace = 'normal'; span.style.wordBreak = 'break-word'; }
+            } else {
+              // Compact behavior: show tail and add leading ellipsis when truncated
+              requestAnimationFrame(()=>{
+                const span = sensorEl.querySelector('span');
+                if (span && span.scrollWidth > sensorEl.clientWidth) sensorEl.classList.add('truncated'); else sensorEl.classList.remove('truncated');
+              });
+            }
+          }
+          // Show the user's preferred source if present, otherwise infer from current use_hwmon
+          const srcEl = document.getElementById('sensor_source');
+          if (d.sensor_source) {
+            srcEl.textContent = (d.sensor_source === 'hwmon') ? 'HWMon' : (d.sensor_source === 'thermal') ? 'Thermal' : 'Auto';
+          } else {
+            srcEl.textContent = (d.use_hwmon ? 'HWMon' : 'Thermal');
+          }
+          // Populate sensor input if user isn't editing it
+          // Populate sensor input if present (modal handles primary editing). Update hwmon/thermal UI
+          const sp = document.getElementById('sensorPath'); if (sp && document.activeElement !== sp) sp.value = d.sensor || '';
           document.getElementById('avg').textContent=d.use_avg_temp;
           // Set form values - do not override a select the user is currently interacting with
           const tz = document.getElementById('thermalZoneSelect');
-          if(tz && document.activeElement !== tz) tz.value = d.thermal_zone;
+          const hw = document.getElementById('hwmonSummary');
+          if (d.use_hwmon) {
+            if (tz) tz.style.display = 'none';
+            if (hw) { hw.classList.remove('hidden'); hw.classList.add('visible'); }
+            loadHwmonsForSelect();
+            const exclLabel = document.getElementById('excludedLabel'); if (exclLabel) exclLabel.textContent = 'Excluded devices';
+          } else {
+            if (tz) { tz.style.display = ''; if(document.activeElement !== tz) tz.value = d.thermal_zone; }
+            if (hw) { hw.classList.remove('visible'); hw.classList.add('hidden'); }
+            const exclLabel = document.getElementById('excludedLabel'); if (exclLabel) exclLabel.textContent = 'Excluded Types';
+          }
           useAvgTemp = d.use_avg_temp;
           const du = document.getElementById('daemon_user'); if (du) du.textContent = d.running_user || '--';
           // Update avg button label to reflect current state
@@ -220,19 +296,22 @@
             function setSettingText(name,val){
               val = val ? val.trim() : val;
               console.log("Setting string " + name + " to " + val);
-              fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: val})}).then(response => response.json()).then(j => {
+              // Return the fetch promise so callers can chain
+              return fetch('/api/settings/'+name, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value: val})}).then(response => response.json()).then(j => {
                 console.log("Response: ", j);
                 if (j && j.saved) showToast('Saved to ' + j.saved_to, 'success');
                 else if (j && j.status === 'ok') showToast('Updated', 'success');
                 else showToast('Update not saved', 'error');
                 update();
-              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); });
+                return j;
+              }).catch((e)=>{ console.log("Error: " + e); showToast("Error setting " + name, 'error'); throw e; });
             }
       function fetchDaemonVersion(){
         fetch('/api/daemon/version').then(r=>r.json()).then(j=>{ const v = j && j.version ? j.version : null; const el = document.querySelector('.topbar .version'); if(el && v) el.textContent = 'v'+v; }).catch(()=>{});
       }
       var _lastZoneRefresh = 0;
       function loadZonesForSelect(){
+        // If daemon is using HWMon, don't load thermal zones; caller should use loadHwmonsForSelect instead
         fetch('/api/zones').then(r=>r.json()).then(data=>{
           const zones = (data.zones || []).slice();
           // Ensure numeric sort by zone number
@@ -250,6 +329,125 @@
           });
           _lastZoneRefresh = Date.now();
         }).catch(()=>{});
+      }
+
+      // load list of hwmon devices (no textual summary in settings)
+      function loadHwmonsForSelect() {
+        fetch('/api/hwmons').then(r=>r.json()).then(data=>{
+          // Intentionally no UI summary rendered here (removed as requested)
+        }).catch(()=>{});
+      }
+
+      // Open the exclude-only modal
+      function openExcludeModal(){ const modal = document.getElementById('excludeModal'); modal.classList.remove('hidden'); loadExcludesModal(); }
+      function closeExcludeModal(){ document.getElementById('excludeModal').classList.add('hidden'); }
+
+      // Populate main settings Source and Device selects
+      function populateSensorControls(){
+        Promise.all([fetch('/api/hwmons').then(r=>r.json()).catch(()=>({hwmons:[]})), fetch('/api/zones').then(r=>r.json()).catch(()=>({zones:[]})), fetch('/api/status').then(r=>r.json()).catch(()=>({}))])
+        .then(([hwData, zData, status])=>{
+          const hw = hwData.hwmons || [];
+          const zones = zData.zones || [];
+          const groupSel = document.getElementById('sensorGroupSelectMain');
+          const deviceSel = document.getElementById('hwmonSensorSelectMain');
+          if (!groupSel || !deviceSel) return;
+          // Determine group selection
+          let group = 'auto'; if (status && status.sensor_source) group = status.sensor_source;
+          groupSel.innerHTML = '';
+          groupSel.innerHTML += `<option value="auto"${group==='auto'?' selected':''}>Auto (HWMon-first)</option>`;
+          groupSel.innerHTML += `<option value="hwmon"${group==='hwmon'?' selected':''}>HWMon</option>`;
+          groupSel.innerHTML += `<option value="thermal"${group==='thermal'?' selected':''}>Thermal Zones</option>`;
+
+          function populateDevices(g){
+            deviceSel.innerHTML = '';
+            if (g === 'hwmon'){
+              deviceSel.innerHTML += `<option value="auto">(select a HWMon sensor)</option>`;
+              hw.forEach(dev=>{
+                dev.sensors.forEach(s=>{
+                  const excluded = !!s.excluded;
+                  const text = (dev.name||dev.id) + ' / ' + (s.label||s.id) + ' - ' + (s.temp===null? '(no reading)' : s.temp+'°C') + (excluded ? ' (excluded)' : '');
+                  const opt = document.createElement('option');
+                  opt.value = s.path;
+                  opt.textContent = text;
+                  if (excluded) { opt.disabled = true; opt.style.color = '#999'; }
+                  deviceSel.appendChild(opt);
+                });
+              });
+            } else if (g === 'thermal'){
+              deviceSel.innerHTML += `<option value="-1">Auto</option>`;
+              zones.forEach(z=>{
+                const excluded = !!z.excluded;
+                const temp_text = (z.temp===null||z.temp===undefined)? '(no reading)': z.temp+'°C';
+                const opt = document.createElement('option');
+                opt.value = z.zone;
+                opt.textContent = `Zone ${z.zone}: ${z.type} - ${temp_text}` + (excluded ? ' (excluded)' : '');
+                if (excluded) { opt.disabled = true; opt.style.color = '#999'; }
+                deviceSel.appendChild(opt);
+              });
+            } else { const eff = (status && status.use_hwmon) ? 'hwmon' : 'thermal'; return populateDevices(eff); }
+          }
+
+          populateDevices(group);
+
+          // change handlers
+          groupSel.onchange = function(){ populateDevices(this.value); if (this.value === 'auto'){ setSettingText('sensor-source','auto'); } else { setSettingText('sensor-source', this.value); } };
+          deviceSel.onchange = function(){ const g = groupSel.value || 'auto'; if (g === 'hwmon'){ const v = this.value || 'auto'; if (v === 'auto') setSettingText('sensor','auto'); else setSettingText('sensor', v); setSettingText('sensor-source','hwmon'); } else if (g === 'thermal'){ setSetting('thermal-zone', this.value); setSettingText('sensor','auto'); setSettingText('sensor-source','thermal'); } };
+
+          // No textual summary is displayed in Settings anymore; nothing to render here
+          // no-op
+        }).catch(()=>{});
+      }
+
+      // Excludes modal: show checkboxes only for the active group
+      function loadExcludesModal(){
+        const el = document.getElementById('excludeModalContent'); el.innerHTML = 'Loading...';
+        Promise.all([fetch('/api/hwmons').then(r=>r.json()).catch(()=>({hwmons:[]})), fetch('/api/zones').then(r=>r.json()).catch(()=>({zones:[]})), fetch('/api/status').then(r=>r.json()).catch(()=>({})), fetch('/api/settings/excluded-types').then(r=>r.json()).catch(()=>({}))]).then(([hwData, zData, status, exclJ])=>{
+          const hw = hwData.hwmons || [];
+          const zones = zData.zones || [];
+          const curExcluded = (exclJ && exclJ.excluded_types) ? exclJ.excluded_types.split(',').map(s=>s.trim()).filter(Boolean) : [];
+          const groupSelMain = document.getElementById('sensorGroupSelectMain');
+          const deviceSelMain = document.getElementById('hwmonSensorSelectMain');
+          const group = (groupSelMain && groupSelMain.value) ? groupSelMain.value : ((status && status.sensor_source) ? status.sensor_source : ((status && status.use_hwmon) ? 'hwmon' : 'thermal'));
+          let out = '<div class="excludes-scroll">';
+          if (group === 'hwmon'){
+            hw.forEach(dev=>{
+              out += `<div class='exclude-group'>`;
+              out += `<div class='exclude-group-header'>${dev.name || dev.id} <small class='exclude-group-id'>${dev.id}</small></div>`;
+              dev.sensors.forEach(s=>{
+                const excl = curExcluded.includes((s.label||dev.name||s.id).toLowerCase()) ? 'checked' : '';
+                out += `<div class='exclude-item'><label><input type="checkbox" class="hwmonExclude" data-name="${(s.label||dev.name||s.id).replace(/\"/g,'') }" ${excl}> <span class='exclude-item-label'>${s.label||s.id}</span> <span class='exclude-item-meta'>${s.temp===null? '(no reading)':s.temp+'°C'}</span></label></div>`;
+              });
+              out += '</div>';
+            });
+          } else if (group === 'thermal'){
+            zones.forEach(z=>{
+              const name = (z.type||('zone'+z.zone));
+              const checked = curExcluded.includes(name.toLowerCase()) ? 'checked' : '';
+              out += `<div class='exclude-group'>`;
+              out += `<div class='exclude-group-header'>Zone ${z.zone} <small class='exclude-group-id'>${name}</small></div>`;
+              out += `<div class='exclude-item'><label><input type="checkbox" class="hwmonExclude" data-name="${name.replace(/\"/g,'')}" ${checked}> <span class='exclude-item-label'>${name}</span> <span class='exclude-item-meta'>${z.temp===null? '(no reading)':z.temp+'°C'}</span></label></div>`;
+              out += `</div>`;
+            });
+          }
+          out += '</div>';
+          el.innerHTML = out;
+        }).catch(()=>{ el.innerHTML = 'Failed to load excludes'; });
+      }
+
+      function saveExcludeModal(){
+        // collect excludes from checkboxes
+        const exclBoxes = document.querySelectorAll('#excludeModal .hwmonExclude');
+        let newExcl = [];
+        exclBoxes.forEach(cb=>{ if (cb.checked) newExcl.push(cb.getAttribute('data-name').toLowerCase()); });
+        // If user deselects all, send 'clear' so server clears the config
+        const payload = (newExcl.length === 0) ? 'clear' : newExcl.join(',');
+        setSettingText('excluded-types', payload).then(()=>{
+          showToast('Excludes saved', 'success');
+          closeExcludeModal();
+          setTimeout(()=>{ populateSensorControls(); update(); }, 500);
+        }).catch(()=>{
+          showToast('Failed to save excludes', 'error');
+        });
       }
 
       // Debounced refresh helper for select open events
@@ -316,6 +514,8 @@
         document.getElementById('deleteBtn').addEventListener('click', deleteProfile);
         document.getElementById('loadBtn').addEventListener('click', loadProfile);
         loadZonesForSelect();
+        // Populate sensor controls (source/device) moved into Settings
+        populateSensorControls();
         // Refresh zones when the user opens the select (keyboard/mouse/touch) with a small debounce
         const tzSelect = document.getElementById('thermalZoneSelect');
         if (tzSelect) {
