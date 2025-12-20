@@ -122,14 +122,21 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
 
 ```
 --dry-run              Simulation mode (no actual frequency changes)
---log <path>           Log file path for debugging
---sensor [path|list]   Custom temperature sensor path (default: auto-detected). Use `--sensor list` or `--sensor` to enumerate available sensors. Note: in the Web UI sensor selection is now in a small Sensor modal (⚙) next to the Avg Temp toggle.
---sensor-source <auto|hwmon|thermal>  Prefer sensor source (default: auto)
+--log <path>           Append log messages to a file (e.g., /var/log/cpu_throttle.log)
+--sensor [path|list]   Manually specify temp sensor file (path) or use `list` to enumerate available sensors
+                       (default: auto-detect; daemon prefers HWMon and falls back to thermal zones)
+--sensor-source <auto|hwmon|thermal>
+                       Prefer a source type when auto-detecting sensors (default: auto)
 --thermal-zone <num>   Specify thermal zone number (overrides auto-detection)
---avg-temp             Use average temperature across CPU zones
---safe-min <freq>      Minimum frequency limit in kHz
---safe-max <freq>      Maximum frequency limit in kHz
+--avg-temp             Use average temperature across CPU-related thermal zones
+--safe-min <freq>      Minimum frequency limit in kHz (e.g. 2000000)
+--safe-max <freq>      Maximum frequency limit in kHz (e.g. 3500000)
 --temp-max <temp>      Maximum temperature threshold in °C (default: 95, range: 50-110)
+--web-port [port]      Start the web UI on the given port (use default if omitted)
+--verbose              Enable verbose logging
+--quiet                Quiet mode (errors only)
+--silent               Silent mode (no output)
+--test                 Run unit tests and exit
 --help                 Show help message
 --install-skin <file>  Install a skin archive (tar.gz or zip) and activate it system-wide
 
