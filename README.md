@@ -4,7 +4,7 @@
 
 A small, efficient Linux daemon that dynamically adjusts CPU maximum frequency based on temperature. It provides runtime control, profile management, an embedded web UI (optional) and an ncurses TUI (optional).
 
-## ✨ What's New in v4.0
+## ✨ What's New in v4.1
 
 - **Automatic Sensor Detection (HWMon preferred)**: Smart auto-detection of the best CPU temperature sensor — prefers HWMon sensors (`/sys/class/hwmon/...`) when available and falls back to thermal zones (`/sys/class/thermal/...`) with manual overrides available
 - **Average Temperature Support**: Use average temperature across multiple CPU zones for better accuracy
@@ -124,6 +124,7 @@ gcc -o cpu_throttle_ctl cpu_throttle_ctl.c -Wall
 --dry-run              Simulation mode (no actual frequency changes)
 --log <path>           Log file path for debugging
 --sensor [path|list]   Custom temperature sensor path (default: auto-detected). Use `--sensor list` or `--sensor` to enumerate available sensors. Note: in the Web UI sensor selection is now in a small Sensor modal (⚙) next to the Avg Temp toggle.
+--sensor-source <auto|hwmon|thermal>  Prefer sensor source (default: auto)
 --thermal-zone <num>   Specify thermal zone number (overrides auto-detection)
 --avg-temp             Use average temperature across CPU zones
 --safe-min <freq>      Minimum frequency limit in kHz
